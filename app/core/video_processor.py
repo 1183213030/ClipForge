@@ -16,6 +16,37 @@ from app.utils.ffmpeg_utils import get_ffmpeg_path, run_command, FFmpegError
 from app.utils.path_utils import normalize_path, ensure_dir
 
 
+class TaskCancelledError(Exception):
+    """Raised when a rendering task is explicitly cancelled by user."""
+    pass
+
+
+class CancellationToken:
+    def __init__(self):
+        self._cancelled = False
+        self._current_process: Optional[subprocess.Popen] = None
+
+    def cancel(self):
+        self._cancelled = True
+        if self._current_process:
+            try:
+                self._current_process.kill()
+            except Exception:
+                pass
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def bind_process(self, process: subprocess.Popen):
+        self._current_process = process
+        if self._cancelled:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+
 @dataclass
 class VideoSegment:
     file_path: str
@@ -47,7 +78,8 @@ class VideoProcessor:
         srt_path: Optional[str | Path],
         output_path: str | Path,
         options: Optional[ExportOptions] = None,
-        on_progress: Optional[Callable[[float], None]] = None
+        on_progress: Optional[Callable[[float], None]] = None,
+        token: Optional[CancellationToken] = None
     ) -> str:
         """
         Renders the final MP4 video using the Direct FilterGraph pipeline.
@@ -147,12 +179,19 @@ class VideoProcessor:
             errors="replace"
         )
 
+        if token:
+            token.bind_process(process)
+
         stderr_collector = []
         time_regex = re.compile(r"time=(\d+):(\d+):(\d+\.?\d*)")
 
         assert process.stderr is not None
         for line in process.stderr:
             stderr_collector.append(line)
+            if token and token.is_cancelled:
+                process.kill()
+                raise TaskCancelledError("任务已被用户取消。")
+
             if on_progress and target_duration > 0:
                 match = time_regex.search(line)
                 if match:
@@ -162,6 +201,9 @@ class VideoProcessor:
                     on_progress(ratio)
 
         process.wait()
+        if token and token.is_cancelled:
+            raise TaskCancelledError("任务已被用户取消。")
+
         ret_code = process.poll()
         if ret_code != 0:
             err_msg = "".join(stderr_collector[-30:])
