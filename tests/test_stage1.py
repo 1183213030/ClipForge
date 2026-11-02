@@ -118,15 +118,16 @@ def run_stage1_verification():
     assert meta_audio.is_valid_audio, "小说音频探测失败"
 
     print("\n[Step 3/5] 构建拼接时间轴...")
-    # Target novel audio duration is 8.5s
-    # Clip 1 takes 5.0s, Clip 2 takes remaining 3.5s (cut from 6.0s)
+    # Target novel audio duration is probed exactly (e.g. 8.54s)
+    # Clip 1 takes 5.0s, Clip 2 takes the remaining duration to strictly cover the full audio
+    remaining_audio_duration = meta_audio.duration - 5.0
     segments = [
         VideoSegment(file_path=clip1, start_time=0.0, duration=5.0),
-        VideoSegment(file_path=clip2, start_time=0.0, duration=3.5)
+        VideoSegment(file_path=clip2, start_time=0.0, duration=remaining_audio_duration)
     ]
     print(f"  片段1: 0.0s -> 5.0s (时长 5.0s)")
-    print(f"  片段2: 0.0s -> 3.5s (截断使用 3.5s)")
-    print(f"  合计计划时长: 8.50s (严格等于音频时长)")
+    print(f"  片段2: 0.0s -> {remaining_audio_duration:.2f}s (截断使用 {remaining_audio_duration:.2f}s)")
+    print(f"  合计计划时长: {meta_audio.duration:.2f}s (严格等于音频时长)")
 
     print("\n[Step 4/5] 执行视频混合渲染 (9:16 / 1080x1920 / 30fps / 4M 码率 / 中文字幕居中烧录)...")
     output_mp4 = PROJECT_ROOT / "output" / "stage1_output_成品_001.mp4"
