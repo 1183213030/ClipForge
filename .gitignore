@@ -48,5 +48,12 @@ bin/ffprobe.exe
 *.swp
 *.swo
 Thumbs.db
+
+# User raw testing assets (large binaries)
+audio/
+reference/
+subtitles/
+videos/
+
 Desktop.ini
 .DS_Store
