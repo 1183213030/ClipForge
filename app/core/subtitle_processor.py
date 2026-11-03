@@ -1,12 +1,13 @@
 """
 Subtitle Processor Module for ClipForge.
-Handles SRT encoding normalization, custom styling, position alignment,
-and FFmpeg subtitles filter syntax generation.
+Handles SRT encoding normalization, intelligent line wrapping (protecting words & URLs),
+custom styling, position alignment, and FFmpeg subtitles filter syntax generation.
 """
 
 from enum import Enum
 from pathlib import Path
 import re
+from typing import Optional
 
 from app.utils.path_utils import escape_ffmpeg_filter_path, ensure_dir
 
@@ -21,13 +22,16 @@ class SubtitleConfig:
     def __init__(
         self,
         font_name: str = "Microsoft YaHei",
-        font_size: int = 20,
+        font_size: int = 22,
         primary_color: str = "&H00FFFFFF",  # ASS Hex: &HAABBGGRR (White)
         outline_color: str = "&H00000000",  # Black outline
         outline_width: int = 2,
         shadow: int = 1,
         position: SubtitlePosition = SubtitlePosition.BOTTOM,
-        margin_v: int = 70  # Vertical margin in pixels
+        margin_v: int = 100,  # Vertical margin in pixels
+        margin_l: int = 60,   # Left safety margin
+        margin_r: int = 60,   # Right safety margin
+        max_line_chars: int = 18  # Max CJK characters per line before wrapping
     ):
         self.font_name = font_name
         self.font_size = font_size
@@ -37,6 +41,9 @@ class SubtitleConfig:
         self.shadow = shadow
         self.position = position
         self.margin_v = margin_v
+        self.margin_l = margin_l
+        self.margin_r = margin_r
+        self.max_line_chars = max_line_chars
 
     def get_alignment_code(self) -> int:
         """Returns ASS alignment number: 2=bottom-center, 5=middle-center, 6=top-center."""
@@ -49,7 +56,6 @@ class SubtitleConfig:
     def to_force_style_str(self) -> str:
         """Serializes styling into FFmpeg force_style string."""
         alignment = self.get_alignment_code()
-        # Note: In ASS styles, MarginV is ignored if Alignment=5 (center), which aligns to exact center
         return (
             f"FontName={self.font_name},"
             f"FontSize={self.font_size},"
@@ -58,14 +64,62 @@ class SubtitleConfig:
             f"Outline={self.outline_width},"
             f"Shadow={self.shadow},"
             f"Alignment={alignment},"
-            f"MarginV={self.margin_v}"
+            f"MarginV={self.margin_v},"
+            f"MarginL={self.margin_l},"
+            f"MarginR={self.margin_r}"
         )
 
 
-def normalize_srt_to_utf8(srt_path: str | Path, temp_dir: str | Path) -> str:
+def wrap_subtitle_text(text: str, max_chars: int = 18) -> str:
+    """
+    Intelligently wraps subtitle lines:
+    - Protects URLs and English words from being broken across lines.
+    - Favors punctuation break points (，。？！；：, . ! ?).
+    - Wraps when length exceeds max_chars.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    # If already contains manual line breaks, process line by line
+    if "\n" in text:
+        return "\n".join(wrap_subtitle_text(line, max_chars) for line in text.split("\n"))
+
+    # Tokenize into chunks: URLs, English words, CJK characters, punctuations
+    pattern = re.compile(r'(https?://\S+|www\.\S+|[a-zA-Z0-9_\-\.]+|[\u4e00-\u9fa5]|[，。？！；：“”‘’（）《》、\s]|\S)')
+    tokens = pattern.findall(text)
+
+    lines = []
+    current_line = []
+    current_len = 0.0
+
+    for token in tokens:
+        # CJK characters count as 1.0, latin/punctuation counts as 0.55
+        is_cjk = bool(re.match(r'[\u4e00-\u9fa5]', token))
+        t_len = 1.0 if is_cjk else max(0.55 * len(token), 0.5)
+
+        if current_len + t_len > max_chars and current_line:
+            # Check if last token is punctuation; if so, break after it
+            lines.append("".join(current_line))
+            current_line = [token]
+            current_len = t_len
+        else:
+            current_line.append(token)
+            current_len += t_len
+
+    if current_line:
+        lines.append("".join(current_line))
+
+    return "\n".join(lines)
+
+
+def normalize_srt_to_utf8(
+    srt_path: str | Path,
+    temp_dir: str | Path,
+    max_line_chars: int = 18
+) -> str:
     """
     Reads an SRT file, auto-detects encoding (UTF-8, UTF-8-SIG, GBK, CP936),
-    and saves a clean UTF-8 copy in temp_dir.
+    applies smart line wrapping, and saves a clean UTF-8 copy in temp_dir.
     """
     raw_path = Path(srt_path).resolve()
     if not raw_path.is_file():
@@ -84,10 +138,31 @@ def normalize_srt_to_utf8(srt_path: str | Path, temp_dir: str | Path) -> str:
     if not content:
         raise ValueError(f"无法识别 SRT 字幕编码格式: {raw_path}")
 
+    # Process subtitle blocks
+    # Standard SRT block regex: index \n timestamp --> timestamp \n text \n\n
+    blocks = re.split(r'\r?\n\r?\n', content.strip())
+    cleaned_blocks = []
+
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) >= 3:
+            idx = lines[0]
+            timestamp = lines[1]
+            text = " ".join(lines[2:])
+            # Wrap text intelligently
+            wrapped_text = wrap_subtitle_text(text, max_chars=max_line_chars)
+            cleaned_blocks.append(f"{idx}\n{timestamp}\n{wrapped_text}")
+        elif len(lines) == 2 and "-->" in lines[1]:
+            cleaned_blocks.append("\n".join(lines))
+        elif block.strip():
+            cleaned_blocks.append(block.strip())
+
+    cleaned_content = "\n\n".join(cleaned_blocks) + "\n"
+
     # Ensure UTF-8 clean file
     out_dir = ensure_dir(temp_dir)
     target_path = out_dir / f"clean_{raw_path.stem}.srt"
-    target_path.write_text(content, encoding="utf-8")
+    target_path.write_text(cleaned_content, encoding="utf-8")
     return str(target_path)
 
 

@@ -59,11 +59,13 @@ class ExportOptions:
     output_width: int = 1080
     output_height: int = 1920
     fps: int = 30
-    video_bitrate: str = "6M"   # e.g. "2M", "4M", "6M", "8M", "10M"
+    video_bitrate: str = "4M"   # e.g. "2M", "4M", "6M", "8M", "10M"
     audio_bitrate: str = "128k"
     audio_samplerate: int = 44100
     preset: str = "fast"
     subtitle_config: Optional[SubtitleConfig] = None
+    template_png_path: Optional[str] = None  # Transparent overlay template
+    enable_template: bool = True
 
 
 class VideoProcessor:
@@ -103,6 +105,10 @@ class VideoProcessor:
             raise ValueError(f"小说音频无效或无法读取: {norm_audio}")
         target_duration = audio_meta.duration
 
+        # Calculate exact required video frames based on audio duration and target FPS
+        import math
+        target_frames = math.ceil(target_duration * opts.fps)
+
         # 2. Normalize and prepare SRT if supplied
         subtitles_filter_str = ""
         if srt_path:
@@ -122,30 +128,54 @@ class VideoProcessor:
                 "-i", normalize_path(seg.file_path)
             ])
 
-        # Add novel audio input as the last input
+        # Add novel audio input
         audio_input_idx = len(segments)
         cmd.extend(["-i", norm_audio])
 
-        # 4. Build FilterGraph
+        # Optional: Add transparent template PNG input
+        template_input_idx = None
+        if opts.enable_template and opts.template_png_path and Path(opts.template_png_path).is_file():
+            template_input_idx = len(segments) + 1
+            cmd.extend(["-i", normalize_path(opts.template_png_path)])
+
+        # 4. Build FilterGraph with frame synchronization & layer ordering
         filter_parts = []
         concat_inputs = []
         for i in range(len(segments)):
-            # Force 1080x1920 crop, 1:1 SAR, 30 FPS
+            # Force 1080x1920 crop, 1:1 SAR, monotonic 30 FPS with near rounding
             filter_parts.append(
                 f"[{i}:v]scale={opts.output_width}:{opts.output_height}:force_original_aspect_ratio=increase,"
-                f"crop={opts.output_width}:{opts.output_height},setsar=1,fps={opts.fps}[v{i}]"
+                f"crop={opts.output_width}:{opts.output_height},setsar=1,"
+                f"fps=fps={opts.fps}:round=near:start_time=0[v{i}]"
             )
             concat_inputs.append(f"[v{i}]")
 
         # Concat video streams (video only, audio completely discarded)
-        filter_parts.append(f"{''.join(concat_inputs)}concat=n={len(segments)}:v=1:a=0[rawv]")
+        filter_parts.append(f"{''.join(concat_inputs)}concat=n={len(segments)}:v=1:a=0[raw_concat]")
 
-        # Apply subtitles filter if available
+        # Frame alignment & safety buffer (only clone max 1 single frame in case of micro frame jitter)
+        filter_parts.append(
+            f"[raw_concat]tpad=stop_mode=clone:stop=1,trim=start_frame=0:end_frame={target_frames},"
+            f"setpts=PTS-STARTPTS[bg_video]"
+        )
+        current_v_label = "[bg_video]"
+
+        # Layer 1: Overlay transparent template PNG if provided (below subtitles)
+        if template_input_idx is not None:
+            filter_parts.append(
+                f"[{template_input_idx}:v]scale={opts.output_width}:{opts.output_height}[tpl_scaled]"
+            )
+            filter_parts.append(
+                f"{current_v_label}[tpl_scaled]overlay=0:0[with_template]"
+            )
+            current_v_label = "[with_template]"
+
+        # Layer 2: Hard-code subtitles on top of everything
         if subtitles_filter_str:
-            filter_parts.append(f"[rawv]{subtitles_filter_str}[outv]")
+            filter_parts.append(f"{current_v_label}{subtitles_filter_str}[outv]")
             video_map_label = "[outv]"
         else:
-            video_map_label = "[rawv]"
+            video_map_label = current_v_label
 
         filter_complex_str = ";".join(filter_parts)
 
@@ -157,10 +187,11 @@ class VideoProcessor:
             "-b:v", opts.video_bitrate,
             "-pix_fmt", "yuv420p",
             "-preset", opts.preset,
+            "-frames:v", str(target_frames),
             "-c:a", "aac",
             "-b:a", opts.audio_bitrate,
             "-ar", str(opts.audio_samplerate),
-            "-t", f"{target_duration:.3f}",  # Strictly clamp output to audio duration
+            "-t", f"{target_duration:.3f}",
             norm_output
         ])
 
