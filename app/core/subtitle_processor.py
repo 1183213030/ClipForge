@@ -70,13 +70,20 @@ class SubtitleConfig:
         )
 
 
+# CJK characters that should NOT start a new line (Hangul/Chinese punctuation rules)
+NO_START_PUNCTUATIONS = set("，。？！；：、’”）》}】…~·?!,;:!\"')]>}")
+
+
 def wrap_subtitle_text(text: str, max_chars: int = 18) -> str:
     """
     Intelligently wraps subtitle lines:
     - Protects URLs and English words from being broken across lines.
     - Favors punctuation break points (，。？！；：, . ! ?).
-    - Wraps when length exceeds max_chars.
+    - Enforces typography rules: never start a new line with trailing punctuations.
+      Trailing punctuation clusters (e.g. ……！！！) always stick to preceding text.
+    - Preserves short sentences without unnecessary line breaks.
     """
+    text = text.strip()
     if len(text) <= max_chars:
         return text
 
@@ -84,8 +91,10 @@ def wrap_subtitle_text(text: str, max_chars: int = 18) -> str:
     if "\n" in text:
         return "\n".join(wrap_subtitle_text(line, max_chars) for line in text.split("\n"))
 
-    # Tokenize into chunks: URLs, English words, CJK characters, punctuations
-    pattern = re.compile(r'(https?://\S+|www\.\S+|[a-zA-Z0-9_\-\.]+|[\u4e00-\u9fa5]|[，。？！；：“”‘’（）《》、\s]|\S)')
+    # Tokenize into chunks: URLs, English words/numbers, CJK characters, punctuations
+    pattern = re.compile(
+        r'(https?://\S+|www\.\S+|[a-zA-Z0-9_\-\.]+|[\u4e00-\u9fa5]|[，。？！；：“”‘’（）《》、…~·\s]|\S)'
+    )
     tokens = pattern.findall(text)
 
     lines = []
@@ -93,15 +102,19 @@ def wrap_subtitle_text(text: str, max_chars: int = 18) -> str:
     current_len = 0.0
 
     for token in tokens:
-        # CJK characters count as 1.0, latin/punctuation counts as 0.55
         is_cjk = bool(re.match(r'[\u4e00-\u9fa5]', token))
         t_len = 1.0 if is_cjk else max(0.55 * len(token), 0.5)
 
+        # If adding token exceeds max_chars
         if current_len + t_len > max_chars and current_line:
-            # Check if last token is punctuation; if so, break after it
-            lines.append("".join(current_line))
-            current_line = [token]
-            current_len = t_len
+            # Trailing punctuation attaches to current line regardless of length
+            if token in NO_START_PUNCTUATIONS:
+                current_line.append(token)
+                current_len += t_len
+            else:
+                lines.append("".join(current_line))
+                current_line = [token]
+                current_len = t_len
         else:
             current_line.append(token)
             current_len += t_len
@@ -109,7 +122,26 @@ def wrap_subtitle_text(text: str, max_chars: int = 18) -> str:
     if current_line:
         lines.append("".join(current_line))
 
-    return "\n".join(lines)
+    # Second pass: ensure NO line starts with trailing punctuation
+    final_lines = []
+    for line in lines:
+        cleaned_line = line.strip()
+        if not cleaned_line:
+            continue
+        if final_lines and cleaned_line[0] in NO_START_PUNCTUATIONS:
+            # Shift leading punctuations to previous line
+            punc_idx = 0
+            while punc_idx < len(cleaned_line) and cleaned_line[punc_idx] in NO_START_PUNCTUATIONS:
+                punc_idx += 1
+            leading_puncs = cleaned_line[:punc_idx]
+            rest = cleaned_line[punc_idx:].strip()
+            final_lines[-1] += leading_puncs
+            if rest:
+                final_lines.append(rest)
+        else:
+            final_lines.append(cleaned_line)
+
+    return "\n".join(final_lines)
 
 
 def normalize_srt_to_utf8(
