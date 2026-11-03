@@ -325,8 +325,12 @@ def run_stage5_workbench_suite():
     workbench.player_widget.player.stop()
     workbench.player_widget.player.setSource(QUrl())
     window.close()
+    window.deleteLater()
+    app.processEvents()
+    time.sleep(0.5)
     app.processEvents()
     print("  [OK] 测试套件正常退出")
+    os._exit(0)
 
 
 

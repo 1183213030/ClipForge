@@ -184,6 +184,8 @@ class VideoProcessor:
             "-map", video_map_label,
             "-map", f"{audio_input_idx}:a",
             "-c:v", "libx264",
+            "-r", str(opts.fps),
+            "-video_track_timescale", str(opts.fps * 1000),
             "-b:v", opts.video_bitrate,
             "-pix_fmt", "yuv420p",
             "-preset", opts.preset,
