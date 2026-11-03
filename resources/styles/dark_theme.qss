@@ -140,6 +140,30 @@ QComboBox QAbstractItemView {
     outline: none;
 }
 
+/* Nav Tabs */
+QPushButton.NavTabBtn {
+    background-color: transparent;
+    color: #94a3b8;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: 600;
+}
+QPushButton.NavTabBtn:hover {
+    background-color: #1a1d26;
+    color: #f1f5f9;
+}
+QPushButton.NavTabBtnActive {
+    background-color: #1e293b;
+    color: #38bdf8;
+    border: 1px solid #3b82f6;
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
 /* Buttons */
 QPushButton {
     background-color: #1f212c;

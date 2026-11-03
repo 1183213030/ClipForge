@@ -11,7 +11,79 @@ from PySide6.QtCore import QThread, Signal
 
 from app.core.media_probe import probe_media, MediaMetadata
 from app.core.media_scanner import MediaScanner, ScanResult
+from app.core.video_processor import VideoProcessor, VideoSegment, ExportOptions, CancellationToken
+from app.core.edit_project import EditProject
 from app.services.task_service import TaskService, TaskRecord, BatchStatistics
+
+import time
+import uuid
+
+
+class ProjectReExportThread(QThread):
+    sig_progress = Signal(float)       # 0.0 - 100.0
+    sig_finished = Signal(str, float)  # output_path, elapsed_seconds
+    sig_error = Signal(str)
+
+    def __init__(self, project: EditProject, output_path: str, temp_dir: Path, parent=None):
+        super().__init__(parent)
+        self.project = project
+        self.output_path = output_path
+        self.temp_dir = temp_dir
+        self.token = CancellationToken()
+
+    def run(self):
+        t0 = time.time()
+        try:
+            # 1. Deterministic TimelinePlan
+            plan = self.project.to_timeline_plan()
+            render_segs = [
+                VideoSegment(
+                    file_path=s.clip_path,
+                    start_time=s.start_time,
+                    duration=s.duration
+                )
+                for s in plan.segments
+            ]
+
+            # 2. Options and Subtitles
+            options = self.project.to_export_options()
+            temp_srt = self.temp_dir / f"reexport_sub_{uuid.uuid4().hex[:6]}.srt"
+            srt_path = self.project.export_edited_srt_file(temp_srt)
+
+            # 3. Video Processing Pipeline
+            processor = VideoProcessor(temp_dir=self.temp_dir)
+            processor.render_mixed_video(
+                segments=render_segs,
+                audio_path=self.project.assets.audio_path,
+                srt_path=srt_path,
+                output_path=self.output_path,
+                options=options,
+                on_progress=lambda p: self.sig_progress.emit(p),
+                token=self.token
+            )
+
+            # 4. Post-export FFprobe validation
+            meta = probe_media(self.output_path)
+            if not meta.is_valid_video:
+                raise RuntimeError("导出的视频文件无效或无法被 FFprobe 解析。")
+
+            elapsed = round(time.time() - t0, 2)
+            self.project.add_export_history(
+                output_path=self.output_path,
+                status="SUCCESS",
+                elapsed=elapsed
+            )
+            self.sig_finished.emit(self.output_path, elapsed)
+        except Exception as e:
+            elapsed = round(time.time() - t0, 2)
+            self.project.add_export_history(
+                output_path=self.output_path,
+                status="FAILED",
+                elapsed=elapsed,
+                error=str(e)
+            )
+            self.sig_error.emit(str(e))
+
 
 
 class ScanFolderThread(QThread):

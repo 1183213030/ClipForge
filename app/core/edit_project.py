@@ -13,6 +13,7 @@ import shutil
 from typing import Optional
 import uuid
 
+from app.core.media_scanner import calculate_file_sha256
 from app.core.randomizer import TimelinePlan, TimelineSegment
 from app.core.subtitle_processor import SubtitleConfig, SubtitlePosition
 from app.core.video_processor import ExportOptions
@@ -20,6 +21,9 @@ from app.utils.path_utils import normalize_path, ensure_dir
 
 
 SCHEMA_VERSION = "1.0.0"
+MIN_SEGMENT_DURATION = 0.5
+FRAME_TOLERANCE_EPSILON = 0.034  # ~1 frame tolerance @ 30 FPS
+
 
 
 class ProjectError(Exception):
@@ -103,7 +107,38 @@ class ExportHistoryRecord:
     error_message: Optional[str] = None
 
 
+def migrate_v090_to_v100(data: dict) -> dict:
+    """Explicit migration logic from v0.9.0/unversioned to v1.0.0."""
+    data.setdefault("meta", {})["schema_version"] = "1.0.0"
+    data.setdefault("render_settings", {})
+    data["render_settings"].setdefault("subtitle_position", "center")
+    data["render_settings"].setdefault("enable_template", True)
+    data["render_settings"].setdefault("font_name", "Microsoft YaHei")
+    data["render_settings"].setdefault("font_size", 24)
+    data.setdefault("export_history", [])
+    return data
+
+
+SCHEMA_MIGRATION_CHAIN = [
+    ("0.9.0", "1.0.0", migrate_v090_to_v100),
+]
+
+
+def apply_schema_migrations(data: dict) -> dict:
+    """Applies sequential schema migrations across versions."""
+    current_ver = data.get("meta", {}).get("schema_version", "0.9.0")
+    if current_ver == SCHEMA_VERSION:
+        return data
+
+    for from_ver, to_ver, mig_fn in SCHEMA_MIGRATION_CHAIN:
+        if current_ver == from_ver or (from_ver == "0.9.0" and current_ver != SCHEMA_VERSION):
+            data = mig_fn(data)
+            current_ver = to_ver
+    return data
+
+
 class EditProject:
+
     def __init__(
         self,
         meta: ProjectMeta,
@@ -156,14 +191,37 @@ class EditProject:
                 return
         raise ValueError(f"未找到目标片段: {segment_id}")
 
+    def rebalance_track(self):
+        """
+        Ensures total video track duration satisfies:
+        abs(sum(s.duration) - self.assets.audio_duration) <= FRAME_TOLERANCE_EPSILON.
+        The tail segment absorbs any difference.
+        """
+        if not self.video_track:
+            return
+        audio_dur = self.assets.audio_duration
+        if len(self.video_track) == 1:
+            self.video_track[0].duration = round(audio_dur, 3)
+            self._touch()
+            return
+
+        other_sum = sum(s.duration for s in self.video_track[:-1])
+        remaining = audio_dur - other_sum
+        if remaining < MIN_SEGMENT_DURATION:
+            raise ValueError(
+                f"前面片段总时长 ({other_sum:.2f}s) 过长，分配给尾部片段的剩余时长 ({remaining:.2f}s) 小于最小允许值 ({MIN_SEGMENT_DURATION}s)。"
+            )
+        self.video_track[-1].duration = round(remaining, 3)
+        self._touch()
+
     def update_segment_duration(self, segment_id: str, new_duration: float):
         """
         Updates the duration of a video segment.
-        Automatically re-adjusts the tail segment to ensure total video duration
-        strictly covers the immutable audio duration.
+        Validates boundaries and re-balances the tail segment.
+        Raises ValueError if constraints cannot be satisfied.
         """
-        if new_duration <= 0.1:
-            raise ValueError("片段时长必须大于 0.1 秒。")
+        if new_duration < MIN_SEGMENT_DURATION:
+            raise ValueError(f"片段时长不能小于 {MIN_SEGMENT_DURATION} 秒。")
 
         target_idx = -1
         for idx, seg in enumerate(self.video_track):
@@ -174,24 +232,116 @@ class EditProject:
         if target_idx == -1:
             raise ValueError(f"未找到目标片段: {segment_id}")
 
-        self.video_track[target_idx].duration = round(new_duration, 3)
-
-        # Re-balance video track to fit audio duration
         audio_dur = self.assets.audio_duration
-        accum = sum(s.duration for s in self.video_track[:-1])
+        if len(self.video_track) == 1:
+            self.video_track[0].duration = round(audio_dur, 3)
+            self._touch()
+            return
 
-        if accum >= audio_dur:
-            # All previous segments already cover audio
-            # Shrink target segment or previous segments
-            excess = accum - audio_dur + 0.1
-            self.video_track[target_idx].duration = max(0.5, round(new_duration - excess, 3))
-
-        # Tail segment takes whatever remains to cover audio
-        new_accum = sum(s.duration for s in self.video_track[:-1])
-        remaining = max(0.5, audio_dur - new_accum)
-        self.video_track[-1].duration = round(remaining, 3)
+        if target_idx < len(self.video_track) - 1:
+            # Modifying a non-tail segment: check tail remainder
+            other_sum = sum(s.duration for i, s in enumerate(self.video_track[:-1]) if i != target_idx)
+            remaining_for_tail = audio_dur - (other_sum + new_duration)
+            if remaining_for_tail < MIN_SEGMENT_DURATION:
+                raise ValueError(
+                    f"无法将片段时长设置为 {new_duration:.2f}s：分配给末尾片段的剩余时长 ({remaining_for_tail:.2f}s) 小于允许的最小片段时长 ({MIN_SEGMENT_DURATION}s)。"
+                )
+            self.video_track[target_idx].duration = round(new_duration, 3)
+            self.video_track[-1].duration = round(remaining_for_tail, 3)
+        else:
+            # Modifying the tail segment directly: preceding segment absorbs
+            if len(self.video_track) > 1:
+                other_sum = sum(s.duration for s in self.video_track[:-2])
+                new_preceding = audio_dur - (other_sum + new_duration)
+                if new_preceding < MIN_SEGMENT_DURATION:
+                    raise ValueError(
+                        f"无法将末尾片段时长设置为 {new_duration:.2f}s：前序片段需缩减至 ({new_preceding:.2f}s)，小于最小允许时长 ({MIN_SEGMENT_DURATION}s)。"
+                    )
+                self.video_track[-2].duration = round(new_preceding, 3)
+                self.video_track[-1].duration = round(new_duration, 3)
 
         self._touch()
+
+    def move_segment(self, segment_id: str, direction: int):
+        """
+        Moves a segment up (-1) or down (+1) in the video track.
+        Re-indexes and rebalances the tail segment.
+        """
+        idx = -1
+        for i, s in enumerate(self.video_track):
+            if s.segment_id == segment_id:
+                idx = i
+                break
+        if idx == -1:
+            raise ValueError(f"未找到目标片段: {segment_id}")
+
+        target_idx = idx + direction
+        if target_idx < 0 or target_idx >= len(self.video_track):
+            return  # Already at top or bottom boundary
+
+        self.video_track[idx], self.video_track[target_idx] = self.video_track[target_idx], self.video_track[idx]
+        for i, s in enumerate(self.video_track):
+            s.order_index = i
+
+        self.rebalance_track()
+        self._touch()
+
+    def add_segment(self, clip_path: str, duration: float = 3.0, clip_sha256: str = "", insert_index: Optional[int] = None):
+        """
+        Adds a new video segment to the track.
+        Automatically balances the tail segment.
+        """
+        if duration < MIN_SEGMENT_DURATION:
+            raise ValueError(f"新片段时长不能小于 {MIN_SEGMENT_DURATION}s。")
+
+        norm_path = normalize_path(clip_path)
+        new_seg = VideoTrackSegment(
+            segment_id=f"seg_{uuid.uuid4().hex[:6]}",
+            order_index=len(self.video_track),
+            clip_path=norm_path,
+            clip_sha256=clip_sha256,
+            display_name=Path(norm_path).name,
+            source_start_time=0.0,
+            duration=round(duration, 3)
+        )
+
+        if insert_index is None or insert_index >= len(self.video_track):
+            if len(self.video_track) >= 1:
+                self.video_track.insert(-1, new_seg)
+            else:
+                self.video_track.append(new_seg)
+        else:
+            self.video_track.insert(max(0, insert_index), new_seg)
+
+        for i, s in enumerate(self.video_track):
+            s.order_index = i
+
+        self.rebalance_track()
+        self._touch()
+
+    def remove_segment(self, segment_id: str):
+        """
+        Removes a segment from the track.
+        At least one segment must remain.
+        """
+        if len(self.video_track) <= 1:
+            raise ValueError("时间轴至少需保留一个视频片段。")
+
+        idx = -1
+        for i, s in enumerate(self.video_track):
+            if s.segment_id == segment_id:
+                idx = i
+                break
+        if idx == -1:
+            raise ValueError(f"未找到目标片段: {segment_id}")
+
+        self.video_track.pop(idx)
+        for i, s in enumerate(self.video_track):
+            s.order_index = i
+
+        self.rebalance_track()
+        self._touch()
+
 
     def edit_subtitle_text(self, subtitle_id: int, new_text: str):
         """Edits subtitle text without altering audio content or timing."""
@@ -257,12 +407,18 @@ class EditProject:
 
         return missing
 
-    def recover_missing_asset(self, old_path: str, new_path: str):
-        """Re-links a missing asset path to a newly located file."""
+    def recover_missing_asset(self, old_path: str, new_path: str, force: bool = False):
+        """
+        Re-links a missing asset path to a newly located file.
+        Verifies SHA-256 file content consistency. If content differs, requires force=True.
+        Updates clip_sha256 and display_name.
+        """
         norm_old = normalize_path(old_path)
         norm_new = normalize_path(new_path)
         if not Path(norm_new).is_file():
             raise FileNotFoundError(f"新的素材文件不存在: {norm_new}")
+
+        new_sha = calculate_file_sha256(norm_new)
 
         matched = False
         if self.assets.audio_path == norm_old:
@@ -279,7 +435,13 @@ class EditProject:
 
         for seg in self.video_track:
             if seg.clip_path == norm_old:
+                if seg.clip_sha256 and seg.clip_sha256 != new_sha and not force:
+                    raise ValueError(
+                        f"素材内容哈希不一致 (原: [{seg.clip_sha256[:8]}], 新: [{new_sha[:8]}]), "
+                        f"可能为同名不同内容视频。如确认替换请使用 force=True。"
+                    )
                 seg.clip_path = norm_new
+                seg.clip_sha256 = new_sha
                 seg.display_name = Path(norm_new).name
                 matched = True
 
@@ -287,6 +449,7 @@ class EditProject:
             raise ValueError(f"项目中未找到引用的旧素材路径: {norm_old}")
 
         self._touch()
+
 
     # =========================================================================
     # Serialization & Atomic Persistence
@@ -343,8 +506,12 @@ class EditProject:
         except Exception as e:
             raise ProjectError(f"解析项目 JSON 失败 (文件损坏): {e}")
 
-        # Schema compatibility & migration
+        # Explicit Schema version migration chain
+        raw_data = apply_schema_migrations(raw_data)
+
+        # Schema normalization
         meta_d = raw_data.get("meta", {})
+
         assets_d = raw_data.get("assets", {})
         video_track_d = raw_data.get("video_track", [])
         subtitle_track_d = raw_data.get("subtitle_track", [])

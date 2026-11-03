@@ -15,17 +15,20 @@ from PySide6.QtGui import QIcon, QCloseEvent
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QLabel, QPushButton, QSpinBox, QLineEdit, QFileDialog,
-    QProgressBar, QScrollArea, QMessageBox, QFrame
+    QProgressBar, QScrollArea, QMessageBox, QFrame, QStackedWidget
 )
 
 from app.core.timeline_builder import TimelineBuilder
+from app.core.edit_project import EditProject, create_project
 from app.services.task_service import TaskService, TaskRecord, BatchStatistics, TaskState
 from app.ui.threads import BatchExportThread
+from app.ui.pages.workbench_page import WorkbenchPage
 from app.ui.widgets.asset_card import AssetCardWidget
 from app.ui.widgets.subtitle_card import SubtitleCardWidget
 from app.ui.widgets.video_card import VideoCardWidget
 from app.ui.widgets.task_item_widget import TaskItemWidget
 from app.utils.path_utils import normalize_path, ensure_dir
+
 
 
 class MainWindow(QMainWindow):
@@ -63,13 +66,16 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(18, 16, 18, 16)
-        main_layout.setSpacing(14)
+        main_layout.setContentsMargins(14, 8, 14, 8)
+        main_layout.setSpacing(8)
 
-        # 1. Header Toolbar
+        # 1. Compact Header Toolbar (~46px)
         main_layout.addLayout(self._create_header())
 
-        # 2. Main Content Splitter (Left: Controls & Inputs, Right: Batch & Tasks)
+        # 2. Main Stacked Views (0: Batch Mix, 1: Workbench)
+        self.stack = QStackedWidget()
+
+        # Page 0: Batch Mix Splitter (Left: Controls & Inputs, Right: Batch & Tasks)
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(8)
 
@@ -106,33 +112,66 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 5)
 
-        main_layout.addWidget(splitter)
+        self.stack.addWidget(splitter)
+
+        # Page 1: Workbench
+        self.workbench_page = WorkbenchPage(self.project_root, self.icons_dir)
+        self.stack.addWidget(self.workbench_page)
+
+        main_layout.addWidget(self.stack, stretch=1)
 
     def _create_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
+        header.setContentsMargins(4, 2, 4, 2)
         header.setSpacing(12)
 
-        # Logo / Title
+        # Compact Logo / Title
         logo_lbl = QLabel()
         logo_img = self.icons_dir / "logo.png"
         if logo_img.is_file():
-            logo_lbl.setPixmap(QIcon(str(logo_img)).pixmap(QSize(28, 28)))
+            logo_lbl.setPixmap(QIcon(str(logo_img)).pixmap(QSize(22, 22)))
 
         title_lbl = QLabel("ClipForge 片段工坊")
-        title_lbl.setProperty("class", "HeaderTitle")
-
-        sub_desc = QLabel("Windows 本地解压短视频智能混剪 · 离线全自动工作台")
-        sub_desc.setProperty("class", "SubText")
-
-        badge_offline = QLabel("纯本地运行 · 零云端依赖")
-        badge_offline.setProperty("class", "BadgeSuccess")
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: 700; color: #ffffff;")
 
         header.addWidget(logo_lbl)
         header.addWidget(title_lbl)
-        header.addWidget(sub_desc)
+
+        # Mode Nav Switcher
+        header.addSpacing(16)
+        self.btn_nav_batch = QPushButton("批量混剪")
+        self.btn_nav_batch.setProperty("class", "NavTabBtnActive")
+        self.btn_nav_batch.setCursor(Qt.PointingHandCursor)
+        self.btn_nav_batch.clicked.connect(lambda: self._switch_page(0))
+
+        self.btn_nav_workbench = QPushButton("精细编辑工作台")
+        self.btn_nav_workbench.setProperty("class", "NavTabBtn")
+        self.btn_nav_workbench.setCursor(Qt.PointingHandCursor)
+        self.btn_nav_workbench.clicked.connect(lambda: self._switch_page(1))
+
+        header.addWidget(self.btn_nav_batch)
+        header.addWidget(self.btn_nav_workbench)
+
         header.addStretch()
+        badge_offline = QLabel("纯本地运行 · 零云端依赖")
+        badge_offline.setProperty("class", "BadgeSuccess")
         header.addWidget(badge_offline)
         return header
+
+    def _switch_page(self, index: int):
+        self.stack.setCurrentIndex(index)
+        if index == 0:
+            self.btn_nav_batch.setProperty("class", "NavTabBtnActive")
+            self.btn_nav_workbench.setProperty("class", "NavTabBtn")
+        else:
+            self.btn_nav_batch.setProperty("class", "NavTabBtn")
+            self.btn_nav_workbench.setProperty("class", "NavTabBtnActive")
+
+        self.btn_nav_batch.style().unpolish(self.btn_nav_batch)
+        self.btn_nav_batch.style().polish(self.btn_nav_batch)
+        self.btn_nav_workbench.style().unpolish(self.btn_nav_workbench)
+        self.btn_nav_workbench.style().polish(self.btn_nav_workbench)
+
 
     def _create_batch_control_card(self) -> QFrame:
         card = QFrame()

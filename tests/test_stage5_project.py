@@ -149,9 +149,9 @@ def run_stage5_project_suite():
     print("  [PASS] 中文/空格路径支持良好，JSON 完整反序列化且数据字段完全一致")
 
     # ---------------------------------------------------------
-    # TC-04: Asset Validation & Path Recovery
+    # TC-04: Asset Validation & Path Recovery with SHA-256 Check
     # ---------------------------------------------------------
-    print("\n[TC-04] 资产完整性校验 (validate_assets) 与丢失恢复 (recover_missing_asset)...")
+    print("\n[TC-04] 资产完整性校验 (validate_assets) 与基于 SHA-256 的丢失恢复 (recover_missing_asset)...")
     missing = loaded_proj.validate_assets()
     assert len(missing) == 0, f"意外的素材丢失: {missing}"
 
@@ -164,21 +164,35 @@ def run_stage5_project_suite():
     assert missing_after_rename[0] == normalize_path(str(clip2))
     print(f"  成功检出丢失素材: {Path(missing_after_rename[0]).name}")
 
-    # Recover asset link
-    loaded_proj.recover_missing_asset(str(clip2), str(new_clip2))
+    # 1. Without force=True and mismatched sha256 -> must raise ValueError
+    try:
+        loaded_proj.recover_missing_asset(str(clip2), str(new_clip2), force=False)
+        assert False, "未能阻止不同哈希文件的隐式静默替换"
+    except ValueError as e:
+        print(f"  安全拦截哈希不匹配文件: {e}")
+
+    # 2. With force=True -> succeeds and updates sha256
+    loaded_proj.recover_missing_asset(str(clip2), str(new_clip2), force=True)
     assert len(loaded_proj.validate_assets()) == 0
     assert loaded_proj.video_track[1].clip_path == normalize_path(str(new_clip2))
     assert loaded_proj.video_track[1].display_name == new_clip2.name
-    print("  [PASS] 成功重定位丢失素材，项目资产校验恢复正常")
+    assert loaded_proj.video_track[1].clip_sha256 != "sha256_222"
+    print("  [PASS] SHA-256 安全校验生效：防范同名替换，显式确认后成功重链并更新哈希")
 
     # ---------------------------------------------------------
     # TC-05: Timeline Segment Reordering
     # ---------------------------------------------------------
-    print("\n[TC-05] 视频片段顺序调整与持久化 (reorder_segments)...")
+    print("\n[TC-05] 视频片段顺序调整与持久化 (reorder_segments / move_segment)...")
     # Original order: seg_001, seg_002, seg_003
     loaded_proj.reorder_segments(["seg_003", "seg_001", "seg_002"])
     assert [s.segment_id for s in loaded_proj.video_track] == ["seg_003", "seg_001", "seg_002"]
     assert [s.order_index for s in loaded_proj.video_track] == [0, 1, 2]
+
+    # Test move_segment up / down
+    loaded_proj.move_segment("seg_002", -1)  # Move seg_002 up: seg_003, seg_002, seg_001
+    assert [s.segment_id for s in loaded_proj.video_track] == ["seg_003", "seg_002", "seg_001"]
+    loaded_proj.move_segment("seg_002", 1)   # Move seg_002 down back: seg_003, seg_001, seg_002
+    assert [s.segment_id for s in loaded_proj.video_track] == ["seg_003", "seg_001", "seg_002"]
 
     # Audio duration and subtitle timestamps MUST remain unchanged
     assert loaded_proj.assets.audio_duration == 10.0
@@ -187,24 +201,50 @@ def run_stage5_project_suite():
     loaded_proj.save(proj_save_path)
     reloaded_proj = EditProject.load(proj_save_path)
     assert [s.segment_id for s in reloaded_proj.video_track] == ["seg_003", "seg_001", "seg_002"]
-    print("  [PASS] 片段重排序成功，独立音轨与字幕轨毫秒未动，重载后顺序严格保留")
+    print("  [PASS] 片段重排序与上移/下移成功，独立音轨与字幕轨毫秒未动，重载后顺序严格保留")
 
     # ---------------------------------------------------------
-    # TC-06: Segment Duration Adjustment & Tail Balancing
+    # TC-06: Segment Duration Adjustment, Boundaries & Tail Balancing
     # ---------------------------------------------------------
-    print("\n[TC-06] 片段时长微调与尾部自适应对齐 (update_segment_duration)...")
-    # Total audio duration is 10.0.
+    print("\n[TC-06] 片段时长调整边界检查与帧级尾部自适应对齐 (|sum(Di)-Ta| <= epsilon)...")
     # Current track: seg_003 (3.0s), seg_001 (3.0s), seg_002 (4.0s). Total = 10.0s.
-    # Now change seg_003 to 5.0s.
+    # Boundary 1: Setting too long duration that leaves tail < 0.5s
+    try:
+        reloaded_proj.update_segment_duration("seg_003", 8.0)
+        assert False, "未能拦截导致尾段时长不足 0.5s 的无效调整"
+    except ValueError as e:
+        print(f"  成功捕获边界超限错误: {e}")
+
+    # Boundary 2: Setting segment duration < 0.5s
+    try:
+        reloaded_proj.update_segment_duration("seg_003", 0.2)
+        assert False, "未能拦截小于最小片段时长 (0.5s) 的设置"
+    except ValueError as e:
+        print(f"  成功拦截过短片段异常: {e}")
+
+    # Valid modification: change seg_003 to 5.0s
     reloaded_proj.update_segment_duration("seg_003", 5.0)
     assert reloaded_proj.video_track[0].duration == 5.0
     assert reloaded_proj.video_track[1].duration == 3.0
     # Tail segment seg_002 should automatically balance to 10.0 - (5.0 + 3.0) = 2.0s
     assert reloaded_proj.video_track[2].duration == 2.0
+
+    # Test adding a segment
+    extra_clip = test_dir / "额外素材.mp4"
+    extra_clip.write_text("dummy extra video", encoding="utf-8")
+    reloaded_proj.add_segment(str(extra_clip), duration=1.0)
+    assert len(reloaded_proj.video_track) == 4
+    # Tail segment balances: 10.0 - (5.0 + 3.0 + 1.0) = 1.0s
+    assert abs(sum(s.duration for s in reloaded_proj.video_track) - 10.0) <= 0.034
+
+    # Test removing a segment
+    reloaded_proj.remove_segment(reloaded_proj.video_track[2].segment_id)
+    assert len(reloaded_proj.video_track) == 3
     total_dur = sum(s.duration for s in reloaded_proj.video_track)
-    assert total_dur >= reloaded_proj.assets.audio_duration
+    assert abs(total_dur - reloaded_proj.assets.audio_duration) <= 0.034
     print(f"  更新后片段时长序列: {[s.duration for s in reloaded_proj.video_track]}, 总时长: {total_dur}s")
-    print("  [PASS] 尾部片段自适应填平音频时长，保证无黑屏或音频截断")
+    print("  [PASS] 严格满足 |sum(Di) - Ta| <= epsilon (0.034s)，非法越界保护严密")
+
 
     # ---------------------------------------------------------
     # TC-07: Subtitle Modification & SRT Export
