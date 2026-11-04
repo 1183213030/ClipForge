@@ -5,10 +5,15 @@ audio stream replacement, subtitle hard-coding, bitrate control, and export.
 """
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import re
 import subprocess
 from typing import Callable, Optional
+import uuid
+
+logger = logging.getLogger(__name__)
+
 
 from app.core.media_probe import probe_media, MediaMetadata
 from app.core.subtitle_processor import SubtitleConfig, normalize_srt_to_utf8, build_subtitles_filter
@@ -177,10 +182,17 @@ class VideoProcessor:
         else:
             video_map_label = current_v_label
 
-        filter_complex_str = ";".join(filter_parts)
+        filter_complex_str = ";\n".join(filter_parts)
+
+        # Write filter complex into an isolated temp script file to eliminate Windows CLI length limits
+        filter_script_path = self.temp_dir / f"filter_script_{uuid.uuid4().hex[:8]}.txt"
+        try:
+            filter_script_path.write_text(filter_complex_str, encoding="utf-8")
+        except Exception as e:
+            raise FFmpegError(f"写入 FFmpeg 滤镜脚本失败: {e}")
 
         cmd.extend([
-            "-filter_complex", filter_complex_str,
+            "-filter_complex_script", str(filter_script_path.resolve()),
             "-map", video_map_label,
             "-map", f"{audio_input_idx}:a",
             "-c:v", "libx264",
@@ -203,46 +215,54 @@ class VideoProcessor:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            startupinfo=startupinfo,
-            encoding="utf-8",
-            errors="replace"
-        )
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                startupinfo=startupinfo,
+                encoding="utf-8",
+                errors="replace"
+            )
 
-        if token:
-            token.bind_process(process)
+            if token:
+                token.bind_process(process)
 
-        stderr_collector = []
-        time_regex = re.compile(r"time=(\d+):(\d+):(\d+\.?\d*)")
+            stderr_collector = []
+            time_regex = re.compile(r"time=(\d+):(\d+):(\d+\.?\d*)")
 
-        assert process.stderr is not None
-        for line in process.stderr:
-            stderr_collector.append(line)
+            assert process.stderr is not None
+            for line in process.stderr:
+                stderr_collector.append(line)
+                if token and token.is_cancelled:
+                    process.kill()
+                    raise TaskCancelledError("任务已被用户取消。")
+
+                if on_progress and target_duration > 0:
+                    match = time_regex.search(line)
+                    if match:
+                        h, m, s = match.groups()
+                        current_sec = int(h) * 3600 + int(m) * 60 + float(s)
+                        ratio = min(max(current_sec / target_duration, 0.0), 1.0)
+                        on_progress(ratio)
+
+            process.wait()
             if token and token.is_cancelled:
-                process.kill()
                 raise TaskCancelledError("任务已被用户取消。")
 
-            if on_progress and target_duration > 0:
-                match = time_regex.search(line)
-                if match:
-                    h, m, s = match.groups()
-                    current_sec = int(h) * 3600 + int(m) * 60 + float(s)
-                    ratio = min(max(current_sec / target_duration, 0.0), 1.0)
-                    on_progress(ratio)
+            ret_code = process.poll()
+            if ret_code != 0:
+                err_msg = "".join(stderr_collector[-30:])
+                raise FFmpegError(f"视频混剪渲染失败 (Exit code {ret_code}):\n{err_msg}")
 
-        process.wait()
-        if token and token.is_cancelled:
-            raise TaskCancelledError("任务已被用户取消。")
+            if on_progress:
+                on_progress(1.0)
 
-        ret_code = process.poll()
-        if ret_code != 0:
-            err_msg = "".join(stderr_collector[-30:])
-            raise FFmpegError(f"视频混剪渲染失败 (Exit code {ret_code}):\n{err_msg}")
+            return norm_output
+        finally:
+            if filter_script_path.exists():
+                try:
+                    filter_script_path.unlink()
+                except Exception as ex:
+                    logger.warning(f"清理临时滤镜脚本文件失败: {filter_script_path} ({ex})")
 
-        if on_progress:
-            on_progress(1.0)
-
-        return norm_output
