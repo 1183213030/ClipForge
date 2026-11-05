@@ -158,9 +158,9 @@ class VideoProcessor:
         # Concat video streams (video only, audio completely discarded)
         filter_parts.append(f"{''.join(concat_inputs)}concat=n={len(segments)}:v=1:a=0[raw_concat]")
 
-        # Frame alignment & safety buffer (only clone max 1 single frame in case of micro frame jitter)
+        # Frame alignment & safety buffer (pad with clone until exact target_frames trim is reached)
         filter_parts.append(
-            f"[raw_concat]tpad=stop_mode=clone:stop=1,trim=start_frame=0:end_frame={target_frames},"
+            f"[raw_concat]tpad=stop_mode=clone:stop=-1,trim=start_frame=0:end_frame={target_frames},"
             f"setpts=PTS-STARTPTS[bg_video]"
         )
         current_v_label = "[bg_video]"
@@ -208,6 +208,16 @@ class VideoProcessor:
             "-t", f"{target_duration:.3f}",
             norm_output
         ])
+
+        # Validate command line length against Windows OS CreateProcess physical limit (32,767 chars)
+        cmd_str = subprocess.list2cmdline(cmd)
+        cmd_length = len(cmd_str)
+        logger.info(f"FFmpeg 命令行总字符长度: {cmd_length} (Windows 安全水位: 32,000 / 物理上限: 32,767)")
+        if subprocess.os.name == "nt" and cmd_length > 32000:
+            raise FFmpegError(
+                f"生成的 FFmpeg 命令行参数过长 ({cmd_length} 字符)，超出 Windows 安全水位限制 (32,000 字符)。\n"
+                f"请减少素材分段数量或缩短素材文件夹路径以避免 CreateProcess 失败。"
+            )
 
         # 5. Execute with live progress parsing
         startupinfo = None

@@ -82,13 +82,17 @@ class Randomizer:
     def generate_single_candidate(
         self,
         clips: list[ClipInfo],
-        target_duration: float
+        target_duration: float,
+        min_segment_duration: Optional[float] = None,
+        max_segment_duration: Optional[float] = None,
+        randomize_start: bool = False
     ) -> tuple[list[TimelineSegment], list[str], list[str]]:
         """
         Builds a single assembly candidate:
         - Shuffles clips per round.
         - Avoids repeating last item of round K as first item of round K+1.
         - Truncates last segment to exactly fit remaining duration.
+        - Optionally slices clips into micro-segments with varied start times.
         """
         segments: list[TimelineSegment] = []
         clip_sequence: list[str] = []
@@ -109,31 +113,54 @@ class Randomizer:
                 current_pool[0], current_pool[swap_idx] = current_pool[swap_idx], current_pool[0]
 
             for clip in current_pool:
-                remaining = target_duration - accumulated
+                remaining = round(target_duration - accumulated, 3)
                 if remaining <= 1e-4:
                     break
 
-                if clip.duration <= remaining:
-                    use_dur = clip.duration
+                if min_segment_duration is not None and max_segment_duration is not None:
+                    if remaining < min_segment_duration:
+                        if segments:
+                            # Merge remaining into previous segment
+                            segments[-1].duration = round(segments[-1].duration + remaining, 3)
+                            accumulated = round(accumulated + remaining, 3)
+                            break
+                        else:
+                            use_dur = remaining
+                    else:
+                        high_dur = min(max_segment_duration, clip.duration, remaining)
+                        low_dur = min(min_segment_duration, high_dur)
+                        use_dur = round(self.rng.uniform(low_dur, high_dur), 3)
+
+                    max_start = max(0.0, clip.duration - use_dur)
+                    start_time = round(self.rng.uniform(0.0, max_start), 3) if (randomize_start and max_start > 0) else 0.0
                 else:
-                    use_dur = remaining
+                    if clip.duration <= remaining:
+                        use_dur = clip.duration
+                    else:
+                        use_dur = remaining
+                    start_time = 0.0
 
                 segments.append(
                     TimelineSegment(
                         clip_path=clip.path,
                         clip_sha256=clip.sha256,
                         display_name=clip.display_name,
-                        start_time=0.0,
+                        start_time=start_time,
                         duration=round(use_dur, 3)
                     )
                 )
                 clip_sequence.append(clip.display_name)
-                accumulated += use_dur
+                accumulated = round(accumulated + use_dur, 3)
                 last_clip_sha = clip.sha256
 
             if round_num > 1:
                 notes.append(f"素材总时长不足以覆盖音频，已进入第 {round_num} 轮循环使用")
             round_num += 1
+
+        if segments:
+            diff = round(target_duration - sum(s.duration for s in segments), 3)
+            if abs(diff) > 1e-4:
+                segments[-1].duration = round(segments[-1].duration + diff, 3)
 
         return segments, clip_sequence, notes
 
@@ -143,7 +170,10 @@ class Randomizer:
         target_duration: float,
         count: int,
         previous_plans: Optional[list[TimelinePlan]] = None,
-        max_candidate_attempts: int = 35
+        max_candidate_attempts: int = 35,
+        min_segment_duration: Optional[float] = None,
+        max_segment_duration: Optional[float] = None,
+        randomize_start: bool = False
     ) -> list[TimelinePlan]:
         """
         Generates 'count' distinct assembly plans, using previous_plans to minimize similarity.
@@ -172,7 +202,13 @@ class Randomizer:
             attempts = 1 if is_severely_constrained and n == 1 else max_candidate_attempts
 
             for _ in range(attempts):
-                segments, seq, notes = self.generate_single_candidate(clips, target_duration)
+                segments, seq, notes = self.generate_single_candidate(
+                    clips,
+                    target_duration,
+                    min_segment_duration=min_segment_duration,
+                    max_segment_duration=max_segment_duration,
+                    randomize_start=randomize_start
+                )
                 
                 # Check maximum similarity against all existing plans
                 if not all_plans:
