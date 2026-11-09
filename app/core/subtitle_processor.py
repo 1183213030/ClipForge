@@ -22,7 +22,7 @@ class SubtitleConfig:
     def __init__(
         self,
         font_name: str = "Microsoft YaHei",
-        font_size: int = 22,
+        font_size: int = 16,
         primary_color: str = "&H00FFFFFF",  # ASS Hex: &HAABBGGRR (White)
         outline_color: str = "&H00000000",  # Black outline
         outline_width: int = 2,

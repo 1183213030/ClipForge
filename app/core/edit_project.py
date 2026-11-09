@@ -87,7 +87,7 @@ class RenderSettings:
     enable_template: bool = True
     template_path: Optional[str] = None
     font_name: str = "Microsoft YaHei"
-    font_size: int = 24
+    font_size: int = 16  # Stage 5.6.3: default subtitle font size is 16
     outline_width: int = 2
     primary_color: str = "&H00FFFFFF"
     outline_color: str = "&H00000000"
@@ -114,7 +114,7 @@ def migrate_v090_to_v100(data: dict) -> dict:
     data["render_settings"].setdefault("subtitle_position", "center")
     data["render_settings"].setdefault("enable_template", True)
     data["render_settings"].setdefault("font_name", "Microsoft YaHei")
-    data["render_settings"].setdefault("font_size", 24)
+    data["render_settings"].setdefault("font_size", 16)
     data.setdefault("export_history", [])
     return data
 
@@ -370,6 +370,17 @@ class EditProject:
                 return
         raise ValueError(f"未找到字幕 ID: {subtitle_id}")
 
+    def set_font_size(self, new_size: int):
+        """
+        Updates the subtitle font size within [12, 36] and touches updated_at.
+        Does not modify raw SRT or other tracks.
+        """
+        if not (12 <= new_size <= 36):
+            raise ValueError(f"字幕字号超出有效范围 [12, 36]: {new_size}")
+        if self.render_settings.font_size != new_size:
+            self.render_settings.font_size = int(new_size)
+            self._touch()
+
     def add_export_history(self, output_path: str, status: str, elapsed: float, error: Optional[str] = None):
         """Appends an export record with auto-incremented version number."""
         next_ver = len(self.export_history) + 1
@@ -568,7 +579,7 @@ class EditProject:
             enable_template=bool(render_d.get("enable_template", True)),
             template_path=normalize_path(render_d["template_path"]) if render_d.get("template_path") else None,
             font_name=str(render_d.get("font_name", "Microsoft YaHei")),
-            font_size=int(render_d.get("font_size", 24)),
+            font_size=int(render_d.get("font_size", 16)),
             outline_width=int(render_d.get("outline_width", 2)),
             primary_color=str(render_d.get("primary_color", "&H00FFFFFF")),
             outline_color=str(render_d.get("outline_color", "&H00000000")),
