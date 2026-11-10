@@ -138,7 +138,7 @@ class SegmentItemWidget(QFrame):
 
 
 class SegmentListWidget(QWidget):
-    segment_selected = Signal(str)  # clip_path
+    segment_selected = Signal(str, str)  # segment_id, clip_path
     project_modified = Signal()
 
     def __init__(self, icons_dir: Path, parent: Optional[QWidget] = None):
@@ -232,7 +232,7 @@ class SegmentListWidget(QWidget):
             return
         for seg in self.project.video_track:
             if seg.segment_id == segment_id:
-                self.segment_selected.emit(seg.clip_path)
+                self.segment_selected.emit(seg.segment_id, seg.clip_path)
                 break
 
     def _on_move_up(self, segment_id: str):

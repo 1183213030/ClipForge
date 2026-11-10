@@ -39,6 +39,7 @@ class WorkbenchPage(QWidget):
         self.current_project_path: Optional[Path] = None
         self.is_dirty: bool = False
         self.reexport_thread: Optional[ProjectReExportThread] = None
+        self._full_rendered_path: Optional[str] = None
 
         self._init_ui()
 
@@ -200,11 +201,31 @@ class WorkbenchPage(QWidget):
                 msg += f"\n...及其他 {len(missing) - 3} 个"
             QMessageBox.warning(self, "素材丢失提示", msg)
 
-        # If project has export history, preview the latest output
+        # Intelligently detect and preview the latest full rendered output
+        self._full_rendered_path = None
         if project.export_history:
-            latest = project.export_history[-1]
-            if Path(latest.output_path).is_file():
-                self.player_widget.load_media(latest.output_path)
+            for item in reversed(project.export_history):
+                if Path(item.output_path).is_file():
+                    self._full_rendered_path = str(Path(item.output_path).resolve())
+                    break
+
+        if not self._full_rendered_path:
+            # Check output directory for matching existing rendered成片
+            p_name = project.meta.project_name
+            candidates = [
+                self.output_dir / f"{p_name}.mp4",
+                self.output_dir / f"{p_name}_v2_font16.mp4",
+                self.output_dir / f"{p_name}_v1.mp4",
+                self.output_dir / "客户小说推文_10月31日_首次完整成片_v2_font16.mp4",
+                self.output_dir / "客户小说推文_10月31日_首次完整成片_v1.mp4"
+            ]
+            for cand in candidates:
+                if cand.is_file():
+                    self._full_rendered_path = str(cand.resolve())
+                    break
+
+        if self._full_rendered_path:
+            self.player_widget.load_media(self._full_rendered_path)
         elif project.video_track:
             first_clip = project.video_track[0].clip_path
             if Path(first_clip).is_file():
@@ -226,9 +247,25 @@ class WorkbenchPage(QWidget):
         self._update_header_status()
         self.timeline_widget.update()
 
-    def _on_segment_selected_for_preview(self, clip_path: str):
-        if Path(clip_path).is_file():
-            self.player_widget.load_media(clip_path)
+    def _on_segment_selected_for_preview(self, segment_id: str, clip_path: str):
+        if self._full_rendered_path and Path(self._full_rendered_path).is_file():
+            # If player currently has different media or none, load the full rendered video
+            if self.player_widget.current_media_path != self._full_rendered_path:
+                self.player_widget.load_media(self._full_rendered_path)
+
+            offset_sec = 0.0
+            if self.project:
+                for seg in self.project.video_track:
+                    if seg.segment_id == segment_id:
+                        break
+                    offset_sec += seg.duration
+
+            ms = int(offset_sec * 1000)
+            self.player_widget.seek(ms)
+            self.timeline_widget.set_current_time(offset_sec)
+        else:
+            if Path(clip_path).is_file():
+                self.player_widget.load_media(clip_path)
 
     def _on_subtitle_clicked(self, start_sec: float):
         ms = int(start_sec * 1000)
@@ -345,6 +382,7 @@ class WorkbenchPage(QWidget):
                 pass
 
         # Load newly re-exported file into preview player
+        self._full_rendered_path = str(Path(out_path).resolve())
         self.player_widget.load_media(out_path)
         QMessageBox.information(
             self, "重新导出成功",

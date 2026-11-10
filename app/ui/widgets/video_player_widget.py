@@ -37,6 +37,7 @@ class VideoPlayerWidget(QWidget):
 
         self.player.positionChanged.connect(self._on_player_position_changed)
         self.player.durationChanged.connect(self._on_player_duration_changed)
+        self.player.mediaStatusChanged.connect(self._on_player_media_status_changed)
         self.player.errorOccurred.connect(self._on_player_error)
 
     def _init_ui(self):
@@ -121,7 +122,7 @@ class VideoPlayerWidget(QWidget):
         layout.addLayout(ctrl_layout)
 
     def load_media(self, file_path: str | Path):
-        """Loads video file for playback."""
+        """Loads video file for playback and triggers initial frame presentation."""
         p = Path(file_path).resolve()
         if not p.is_file():
             self.lbl_status.setText(f"预览视频未找到: {p.name}")
@@ -130,8 +131,18 @@ class VideoPlayerWidget(QWidget):
 
         self.current_media_path = str(p)
         self.lbl_status.hide()
+        self._first_frame_rendered = False
         self.player.setSource(QUrl.fromLocalFile(str(p)))
         self._update_play_icon(False)
+
+    def _on_player_media_status_changed(self, status):
+        """Forces hardware decoder to flush and present the first frame at 00:00."""
+        if not getattr(self, "_first_frame_rendered", False) and status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+            self._first_frame_rendered = True
+            if self.player.playbackState() != QMediaPlayer.PlayingState:
+                self.player.pause()
+                self.player.setPosition(0)
+                self._update_play_icon(False)
 
     def toggle_play(self):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
