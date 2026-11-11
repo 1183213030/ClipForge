@@ -46,9 +46,14 @@ class SubtitleConfig:
         self.max_line_chars = max_line_chars
 
     def get_alignment_code(self) -> int:
-        """Returns ASS alignment number: 2=bottom-center, 5=middle-center, 6=top-center."""
+        """
+        Returns ASS/SSA alignment number:
+        2 = bottom-center
+        6 = top-center
+        10 = middle-center (exact geometric center in FFmpeg subtitles filter)
+        """
         if self.position == SubtitlePosition.CENTER:
-            return 5
+            return 10
         elif self.position == SubtitlePosition.TOP:
             return 6
         return 2
@@ -56,6 +61,8 @@ class SubtitleConfig:
     def to_force_style_str(self) -> str:
         """Serializes styling into FFmpeg force_style string."""
         alignment = self.get_alignment_code()
+        # When vertically centered, MarginV should be 0 to keep dead center
+        margin_v = 0 if self.position == SubtitlePosition.CENTER else self.margin_v
         return (
             f"FontName={self.font_name},"
             f"FontSize={self.font_size},"
@@ -64,9 +71,10 @@ class SubtitleConfig:
             f"Outline={self.outline_width},"
             f"Shadow={self.shadow},"
             f"Alignment={alignment},"
-            f"MarginV={self.margin_v},"
+            f"MarginV={margin_v},"
             f"MarginL={self.margin_l},"
-            f"MarginR={self.margin_r}"
+            f"MarginR={self.margin_r},"
+            f"WrapStyle=2"
         )
 
 
@@ -74,14 +82,14 @@ class SubtitleConfig:
 NO_START_PUNCTUATIONS = set("，。？！；：、’”）》}】…~·?!,;:!\"')]>}")
 
 
-def wrap_subtitle_text(text: str, max_chars: int = 18) -> str:
+def wrap_subtitle_text(text: str, max_chars: int = 24) -> str:
     """
     Intelligently wraps subtitle lines:
     - Protects URLs and English words from being broken across lines.
     - Favors punctuation break points (，。？！；：, . ! ?).
     - Enforces typography rules: never start a new line with trailing punctuations.
       Trailing punctuation clusters (e.g. ……！！！) always stick to preceding text.
-    - Preserves short sentences without unnecessary line breaks.
+    - Preserves short sentences without unnecessary line breaks (up to max_chars=24).
     """
     text = text.strip()
     if len(text) <= max_chars:
@@ -147,7 +155,7 @@ def wrap_subtitle_text(text: str, max_chars: int = 18) -> str:
 def normalize_srt_to_utf8(
     srt_path: str | Path,
     temp_dir: str | Path,
-    max_line_chars: int = 18
+    max_line_chars: int = 24
 ) -> str:
     """
     Reads an SRT file, auto-detects encoding (UTF-8, UTF-8-SIG, GBK, CP936),

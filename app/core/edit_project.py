@@ -372,11 +372,11 @@ class EditProject:
 
     def set_font_size(self, new_size: int):
         """
-        Updates the subtitle font size within [12, 36] and touches updated_at.
+        Updates the subtitle font size within [8, 36] and touches updated_at.
         Does not modify raw SRT or other tracks.
         """
-        if not (12 <= new_size <= 36):
-            raise ValueError(f"字幕字号超出有效范围 [12, 36]: {new_size}")
+        if not (8 <= new_size <= 36):
+            raise ValueError(f"字幕字号超出有效范围 [8, 36]: {new_size}")
         if self.render_settings.font_size != new_size:
             self.render_settings.font_size = int(new_size)
             self._touch()

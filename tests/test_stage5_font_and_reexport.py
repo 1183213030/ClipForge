@@ -82,18 +82,21 @@ class TestStage563FontSizeAndReExport(unittest.TestCase):
             video_clips=[str(self.dummy_video)]
         )
         # Valid boundaries
-        proj.set_font_size(12)
-        self.assertEqual(proj.render_settings.font_size, 12)
+        proj.set_font_size(8)
+        self.assertEqual(proj.render_settings.font_size, 8)
 
         proj.set_font_size(36)
         self.assertEqual(proj.render_settings.font_size, 36)
+
+        proj.set_font_size(10)
+        self.assertEqual(proj.render_settings.font_size, 10)
 
         proj.set_font_size(16)
         self.assertEqual(proj.render_settings.font_size, 16)
 
         # Invalid values
         with self.assertRaises(ValueError):
-            proj.set_font_size(11)
+            proj.set_font_size(7)
 
         with self.assertRaises(ValueError):
             proj.set_font_size(37)
@@ -180,7 +183,7 @@ class TestStage563FontSizeAndReExport(unittest.TestCase):
 
         # Range clamping in widget
         widget.spin_font_size.setValue(5)
-        self.assertEqual(widget.spin_font_size.value(), 12, "下限应被自动限制为 12")
+        self.assertEqual(widget.spin_font_size.value(), 8, "下限应被自动限制为 8")
 
         widget.spin_font_size.setValue(50)
         self.assertEqual(widget.spin_font_size.value(), 36, "上限应被自动限制为 36")

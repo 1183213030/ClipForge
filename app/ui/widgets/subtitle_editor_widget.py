@@ -55,11 +55,11 @@ class SubtitleEditorWidget(QWidget):
         toolbar.addWidget(lbl_font_size)
 
         self.spin_font_size = QSpinBox()
-        self.spin_font_size.setRange(12, 36)
-        self.spin_font_size.setValue(16)
+        self.spin_font_size.setRange(8, 36)
+        self.spin_font_size.setValue(10)
         self.spin_font_size.setSingleStep(1)
         self.spin_font_size.setSuffix(" px")
-        self.spin_font_size.setToolTip("调节推文字幕渲染字号 (范围 12 - 36 px，默认 16 px)")
+        self.spin_font_size.setToolTip("调节推文字幕渲染字号 (范围 8 - 36 px，对标客户样片默认 10 px)")
         self.spin_font_size.setStyleSheet("""
             QSpinBox {
                 background-color: #101217;
