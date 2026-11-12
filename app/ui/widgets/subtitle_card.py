@@ -66,16 +66,18 @@ class SubtitleCardWidget(QFrame):
         # 2. Font Size
         grid.addWidget(QLabel("字幕字号:"), 0, 2)
         self.spin_size = QSpinBox()
-        self.spin_size.setRange(14, 48)
-        self.spin_size.setValue(22)
+        self.spin_size.setRange(8, 48)
+        self.spin_size.setValue(10)
+        self.spin_size.setSuffix(" px")
+        self.spin_size.setToolTip("推文字幕渲染字号 (范围 8 - 48 px，样片推荐 9 - 10 px)")
         self.spin_size.valueChanged.connect(self._update_preview)
         grid.addWidget(self.spin_size, 0, 3)
 
         # 3. Position Alignment
         grid.addWidget(QLabel("字幕位置:"), 1, 0)
         self.combo_pos = QComboBox()
-        self.combo_pos.addItem("底部居中 (推荐短视频)", SubtitlePosition.BOTTOM)
-        self.combo_pos.addItem("画面正中央", SubtitlePosition.CENTER)
+        self.combo_pos.addItem("画面正中央 (小说推文推荐)", SubtitlePosition.CENTER)
+        self.combo_pos.addItem("底部居中 (传统短视频)", SubtitlePosition.BOTTOM)
         self.combo_pos.addItem("顶部居中", SubtitlePosition.TOP)
         self.combo_pos.currentIndexChanged.connect(self._update_preview)
         grid.addWidget(self.combo_pos, 1, 1)
@@ -118,15 +120,16 @@ class SubtitleCardWidget(QFrame):
             align = Qt.AlignBottom | Qt.AlignHCenter
 
         self.preview_lbl.setAlignment(align)
+        ui_px = max(11, min(int(font_size * 1.1), 26))
         self.preview_lbl.setStyleSheet(
             f"font-family: '{font_name}'; "
-            f"font-size: {font_size - 4}px; "
+            f"font-size: {ui_px}px; "
             f"font-weight: bold; "
             f"color: #ffffff;"
         )
 
     def get_subtitle_config(self) -> SubtitleConfig:
-        pos = self.combo_pos.currentData() or SubtitlePosition.BOTTOM
+        pos = self.combo_pos.currentData() or SubtitlePosition.CENTER
         return SubtitleConfig(
             font_name=self.combo_font.currentText(),
             font_size=self.spin_size.value(),
@@ -134,5 +137,8 @@ class SubtitleCardWidget(QFrame):
             outline_color="&H00000000",
             outline_width=self.spin_stroke.value(),
             position=pos,
-            margin_v=80 if pos == SubtitlePosition.BOTTOM else 40
+            margin_v=0 if pos == SubtitlePosition.CENTER else (80 if pos == SubtitlePosition.BOTTOM else 40),
+            margin_l=30,
+            margin_r=30,
+            max_line_chars=24
         )
