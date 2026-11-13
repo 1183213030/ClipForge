@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QFileDialog
+    QLineEdit, QPushButton, QFileDialog, QCheckBox
 )
 
 from app.core.media_scanner import ScanResult
@@ -24,9 +24,12 @@ class AssetCardWidget(QFrame):
         self.icons_dir = icons_dir
         self.setProperty("class", "CardFrame")
 
+        self.project_root = self.icons_dir.parent.parent
         self.audio_path: Optional[str] = None
         self.srt_path: Optional[str] = None
         self.video_folder: Optional[str] = None
+        self.template_path: Optional[str] = None
+        self.enable_template: bool = True
         self.scan_result: Optional[ScanResult] = None
 
         self._scan_thread: Optional[ScanFolderThread] = None
@@ -102,7 +105,35 @@ class AssetCardWidget(QFrame):
         folder_row.addWidget(self.btn_rescan)
         layout.addLayout(folder_row)
 
-        # 4. Scan stats sub-card
+        # 4. Novel Tweet Template PNG Row (Corner badge, branding, bottom disclaimer)
+        tpl_header_row = QHBoxLayout()
+        self.chk_template = QCheckBox("启用推文模板图层 (PNG)")
+        self.chk_template.setChecked(True)
+        self.chk_template.setStyleSheet("color: #60a5fa; font-weight: 600; font-size: 12px;")
+        self.chk_template.toggled.connect(self._on_template_toggled)
+        tpl_header_row.addWidget(self.chk_template)
+        tpl_header_row.addStretch()
+        layout.addLayout(tpl_header_row)
+
+        self.template_input = QLineEdit()
+        self.template_input.setPlaceholderText("选择推文透明模板 PNG (含右上角角标、左下标识与底部免责声明)...")
+        self.template_input.setReadOnly(True)
+        self.btn_browse_template = QPushButton("浏览模板")
+        self.btn_browse_template.clicked.connect(self._browse_template)
+
+        tpl_row = QHBoxLayout()
+        tpl_row.addWidget(self.template_input)
+        tpl_row.addWidget(self.btn_browse_template)
+        layout.addLayout(tpl_row)
+
+        self.template_info_lbl = QLabel("未选择模板")
+        self.template_info_lbl.setProperty("class", "SubText")
+        layout.addWidget(self.template_info_lbl)
+
+        # Auto-detect bundled template
+        self._auto_detect_template()
+
+        # 5. Scan stats sub-card
         self.stats_frame = QFrame()
         self.stats_frame.setProperty("class", "SubCardFrame")
         stats_layout = QHBoxLayout(self.stats_frame)
@@ -124,6 +155,58 @@ class AssetCardWidget(QFrame):
         stats_layout.addWidget(self.lbl_dur_stat)
 
         layout.addWidget(self.stats_frame)
+
+    def _auto_detect_template(self):
+        """Auto-detect bundled customer novel tweet template."""
+        candidates = [
+            self.project_root / "resources" / "templates" / "customer_template.png",
+            self.project_root / "templates" / "customer_template.png",
+        ]
+        for c in candidates:
+            if c.is_file():
+                self._set_template_file(str(c), auto=True)
+                return
+
+    def _browse_template(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "选择推文模板透明 PNG", "", "PNG 图片 (*.png)"
+        )
+        if f:
+            self._set_template_file(f, auto=False)
+
+    def _set_template_file(self, file_path: str, auto: bool = False):
+        p = Path(file_path)
+        if not p.is_file():
+            return
+        self.template_path = str(p.resolve())
+        self.template_input.setText(p.name)
+
+        # Inspect dimensions & transparency
+        try:
+            from PIL import Image
+            with Image.open(self.template_path) as im:
+                w, h = im.size
+                mode = im.mode
+                has_alpha = "A" in mode
+                tag = " (默认模板已自动装载)" if auto else ""
+                if has_alpha:
+                    self.template_info_lbl.setText(f"模板就绪: {w}x{h} RGBA 透明通道正常{tag}")
+                    self.template_info_lbl.setStyleSheet("color: #34d399;")
+                else:
+                    self.template_info_lbl.setText(f"警告: 模板为 {mode} 格式，未检测到透明 Alpha 通道{tag}")
+                    self.template_info_lbl.setStyleSheet("color: #f59e0b;")
+        except Exception:
+            self.template_info_lbl.setText(f"模板就绪: {p.name}")
+            self.template_info_lbl.setStyleSheet("color: #34d399;")
+
+        self._notify_change()
+
+    def _on_template_toggled(self, checked: bool):
+        self.enable_template = checked
+        self.template_input.setEnabled(checked)
+        self.btn_browse_template.setEnabled(checked)
+        self.template_info_lbl.setEnabled(checked)
+        self._notify_change()
 
     def _browse_audio(self):
         f, _ = QFileDialog.getOpenFileName(

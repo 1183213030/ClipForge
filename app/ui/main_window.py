@@ -325,7 +325,12 @@ class MainWindow(QMainWindow):
 
         # 3. Create batch in TaskService
         sub_cfg = self.subtitle_card.get_subtitle_config()
-        export_opts = self.video_card.get_export_options(sub_cfg)
+        tpl_path = self.asset_card.template_path if self.asset_card.enable_template else None
+        export_opts = self.video_card.get_export_options(
+            sub_config=sub_cfg,
+            template_png_path=tpl_path,
+            enable_template=self.asset_card.enable_template and bool(tpl_path)
+        )
 
         new_tasks = self.task_service.create_batch(
             plans=plans,

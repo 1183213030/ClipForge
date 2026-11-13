@@ -4,6 +4,7 @@ Displays standardized video specifications and provides bitrate tier selection.
 """
 
 from pathlib import Path
+from typing import Optional
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
@@ -76,7 +77,12 @@ class VideoCardWidget(QFrame):
 
         layout.addLayout(grid)
 
-    def get_export_options(self, sub_config: SubtitleConfig) -> ExportOptions:
+    def get_export_options(
+        self,
+        sub_config: SubtitleConfig,
+        template_png_path: Optional[str] = None,
+        enable_template: bool = True
+    ) -> ExportOptions:
         bitrate_val = self.combo_bitrate.currentData() or "4M"
         return ExportOptions(
             output_width=1080,
@@ -86,5 +92,7 @@ class VideoCardWidget(QFrame):
             audio_bitrate="128k",
             audio_samplerate=44100,
             preset="fast",
-            subtitle_config=sub_config
+            subtitle_config=sub_config,
+            template_png_path=template_png_path,
+            enable_template=enable_template
         )
