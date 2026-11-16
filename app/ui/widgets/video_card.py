@@ -81,9 +81,11 @@ class VideoCardWidget(QFrame):
         self,
         sub_config: SubtitleConfig,
         template_png_path: Optional[str] = None,
-        enable_template: bool = True
+        enable_template: bool = True,
+        fonts_dir: Optional[str] = None
     ) -> ExportOptions:
         bitrate_val = self.combo_bitrate.currentData() or "4M"
+        effective_fonts_dir = fonts_dir or (sub_config.fonts_dir if sub_config else None)
         return ExportOptions(
             output_width=1080,
             output_height=1920,
@@ -94,5 +96,6 @@ class VideoCardWidget(QFrame):
             preset="fast",
             subtitle_config=sub_config,
             template_png_path=template_png_path,
-            enable_template=enable_template
+            enable_template=enable_template,
+            fonts_dir=effective_fonts_dir
         )

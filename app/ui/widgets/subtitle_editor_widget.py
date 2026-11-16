@@ -7,14 +7,17 @@ of subtitle text and start/end timestamps, updating EditProject without altering
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QSpinBox, QFrame
+    QMessageBox, QSpinBox, QFrame, QComboBox,
+    QPushButton, QFileDialog
 )
 
 from app.core.edit_project import EditProject
+from app.core.font_manager import FontManager
 
 
 class SubtitleEditorWidget(QWidget):
@@ -24,6 +27,8 @@ class SubtitleEditorWidget(QWidget):
     def __init__(self, icons_dir: Path, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.icons_dir = icons_dir
+        self.project_root = self.icons_dir.parent.parent
+        self.font_manager = FontManager(self.project_root / "resources" / "fonts")
         self.project: Optional[EditProject] = None
         self._is_populating = False
         self._current_preview_text = "门后显现出一道耀眼的金色光华！"
@@ -46,7 +51,7 @@ class SubtitleEditorWidget(QWidget):
         hdr.addWidget(self.lbl_count)
         layout.addLayout(hdr)
 
-        # Font Size Toolbar & Live Typography Preview Strip (Stage 5.6.3)
+        # Font and Size Toolbar & Live Typography Preview Strip (Stage 5.6.3)
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
@@ -77,6 +82,23 @@ class SubtitleEditorWidget(QWidget):
         """)
         self.spin_font_size.valueChanged.connect(self._on_font_size_changed)
         toolbar.addWidget(self.spin_font_size)
+
+        toolbar.addSpacing(6)
+        lbl_font_name = QLabel("字体:")
+        lbl_font_name.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        toolbar.addWidget(lbl_font_name)
+
+        self.combo_font = QComboBox()
+        self._refresh_font_list()
+        self.combo_font.currentTextChanged.connect(self._on_font_name_changed)
+        toolbar.addWidget(self.combo_font)
+
+        self.btn_add_font = QPushButton("添加新字体")
+        self.btn_add_font.setIcon(QIcon(str(self.icons_dir / "plus.svg")))
+        self.btn_add_font.setIconSize(QSize(13, 13))
+        self.btn_add_font.setToolTip("选择外部 TTF / OTF / TTC 字体文件导入并在视频渲染中使用")
+        self.btn_add_font.clicked.connect(self._on_add_font_clicked)
+        toolbar.addWidget(self.btn_add_font)
 
         toolbar.addStretch()
         layout.addLayout(toolbar)
@@ -152,10 +174,18 @@ class SubtitleEditorWidget(QWidget):
         self.table.setRowCount(len(subs))
         self.lbl_count.setText(f"{len(subs)} 条字幕")
 
-        # Synchronize font size control with project render_settings
+        # Synchronize font size and font name controls with project render_settings
         self.spin_font_size.blockSignals(True)
         self.spin_font_size.setValue(self.project.render_settings.font_size)
         self.spin_font_size.blockSignals(False)
+
+        if hasattr(self, "combo_font"):
+            self.combo_font.blockSignals(True)
+            font_target = self.project.render_settings.font_name or "Microsoft YaHei"
+            if self.combo_font.findText(font_target) == -1:
+                self.combo_font.addItem(font_target)
+            self.combo_font.setCurrentText(font_target)
+            self.combo_font.blockSignals(False)
 
         if subs:
             self._update_preview_strip(subs[0].edited_text)
@@ -209,16 +239,74 @@ class SubtitleEditorWidget(QWidget):
             QMessageBox.warning(self, "字号设置无效", str(e))
             self.spin_font_size.setValue(self.project.render_settings.font_size)
 
+    def _refresh_font_list(self):
+        """Populates combo_font with custom and standard fonts."""
+        if not hasattr(self, "combo_font"):
+            return
+        current = self.combo_font.currentText()
+        self.combo_font.blockSignals(True)
+        self.combo_font.clear()
+        fonts = self.font_manager.get_available_fonts()
+        for f in fonts:
+            self.combo_font.addItem(f)
+        target = current or (self.project.render_settings.font_name if self.project else "Microsoft YaHei")
+        if target and self.combo_font.findText(target) != -1:
+            self.combo_font.setCurrentText(target)
+        elif self.combo_font.findText("Microsoft YaHei") != -1:
+            self.combo_font.setCurrentText("Microsoft YaHei")
+        self.combo_font.blockSignals(False)
+
+    def _on_font_name_changed(self, new_font: str):
+        if self._is_populating or not self.project:
+            return
+        try:
+            self.project.set_font_name(new_font)
+            self._update_preview_strip()
+            self.project_modified.emit()
+        except Exception as e:
+            QMessageBox.warning(self, "字体设置无效", str(e))
+            if hasattr(self, "combo_font"):
+                self.combo_font.setCurrentText(self.project.render_settings.font_name)
+
+    def _on_add_font_clicked(self):
+        """Opens file dialog for user to select and import new font file."""
+        f, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择自定义字体文件",
+            "",
+            "字体文件 (*.ttf *.otf *.ttc *.woff *.woff2);;所有文件 (*.*)"
+        )
+        if not f:
+            return
+
+        ok, msg, families = self.font_manager.import_font_file(f)
+        if ok and families:
+            self._refresh_font_list()
+            primary_family = families[0]
+            self.combo_font.setCurrentText(primary_family)
+            if self.project:
+                self.project.set_font_name(primary_family)
+                self.project_modified.emit()
+            self._update_preview_strip()
+            QMessageBox.information(self, "字体导入成功", f"成功添加并装载新字体: {primary_family}\n({Path(f).name})")
+        else:
+            QMessageBox.warning(self, "字体导入失败", msg)
+
     def _update_preview_strip(self, text: Optional[str] = None):
         if text:
             self._current_preview_text = text.replace("\n", " ")
         font_sz = self.spin_font_size.value() if hasattr(self, "spin_font_size") else 16
+        font_name = (
+            self.combo_font.currentText()
+            if hasattr(self, "combo_font") and self.combo_font.currentText()
+            else (self.project.render_settings.font_name if self.project else "Microsoft YaHei")
+        )
         if hasattr(self, "lbl_preview_text"):
             self.lbl_preview_text.setText(self._current_preview_text)
             # Map font_sz proportionally to UI preview (12 -> 11px, 16 -> 14px, 24 -> 18px, 36 -> 24px)
             ui_px = max(11, min(int(font_sz * 0.85), 24))
             self.lbl_preview_text.setStyleSheet(
-                f"font-family: 'Microsoft YaHei', sans-serif; "
+                f"font-family: '{font_name}', sans-serif; "
                 f"font-size: {ui_px}px; "
                 f"font-weight: 700; "
                 f"color: #ffffff; "

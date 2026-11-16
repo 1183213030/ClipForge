@@ -71,6 +71,7 @@ class ExportOptions:
     subtitle_config: Optional[SubtitleConfig] = None
     template_png_path: Optional[str] = None  # Transparent overlay template
     enable_template: bool = True
+    fonts_dir: Optional[str] = None
 
 
 class VideoProcessor:
@@ -120,7 +121,8 @@ class VideoProcessor:
             norm_srt = normalize_path(srt_path)
             clean_srt = normalize_srt_to_utf8(norm_srt, self.temp_dir)
             sub_cfg = opts.subtitle_config or SubtitleConfig()
-            subtitles_filter_str = build_subtitles_filter(clean_srt, sub_cfg)
+            effective_fonts_dir = opts.fonts_dir or sub_cfg.fonts_dir
+            subtitles_filter_str = build_subtitles_filter(clean_srt, sub_cfg, fonts_dir=effective_fonts_dir)
 
         # 3. Construct FFmpeg command
         cmd = [self.ffmpeg_path, "-y"]

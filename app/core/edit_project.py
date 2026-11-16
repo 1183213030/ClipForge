@@ -381,6 +381,17 @@ class EditProject:
             self.render_settings.font_size = int(new_size)
             self._touch()
 
+    def set_font_name(self, font_name: str):
+        """
+        Updates the subtitle font name and touches updated_at.
+        """
+        font_name = str(font_name).strip()
+        if not font_name:
+            raise ValueError("字体名称不能为空")
+        if self.render_settings.font_name != font_name:
+            self.render_settings.font_name = font_name
+            self._touch()
+
     def add_export_history(self, output_path: str, status: str, elapsed: float, error: Optional[str] = None):
         """Appends an export record with auto-incremented version number."""
         next_ver = len(self.export_history) + 1
@@ -651,6 +662,9 @@ class EditProject:
         elif rs.subtitle_position == "top":
             pos_enum = SubtitlePosition.TOP
 
+        fonts_p = Path("resources/fonts").resolve()
+        effective_fonts_dir = str(fonts_p) if fonts_p.is_dir() else None
+
         sub_cfg = SubtitleConfig(
             font_name=rs.font_name,
             font_size=rs.font_size,
@@ -660,7 +674,8 @@ class EditProject:
             position=pos_enum,
             margin_v=rs.margin_v,
             margin_l=rs.margin_l,
-            margin_r=rs.margin_r
+            margin_r=rs.margin_r,
+            fonts_dir=effective_fonts_dir
         )
 
         tpl_p = rs.template_path or self.assets.template_png_path
@@ -671,7 +686,8 @@ class EditProject:
             video_bitrate=rs.video_bitrate,
             subtitle_config=sub_cfg,
             template_png_path=tpl_p,
-            enable_template=rs.enable_template
+            enable_template=rs.enable_template,
+            fonts_dir=effective_fonts_dir
         )
 
     def export_edited_srt_file(self, target_srt_path: str | Path) -> str:

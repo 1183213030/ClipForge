@@ -31,7 +31,8 @@ class SubtitleConfig:
         margin_v: int = 100,  # Vertical margin in pixels
         margin_l: int = 60,   # Left safety margin
         margin_r: int = 60,   # Right safety margin
-        max_line_chars: int = 18  # Max CJK characters per line before wrapping
+        max_line_chars: int = 18,  # Max CJK characters per line before wrapping
+        fonts_dir: Optional[str | Path] = None
     ):
         self.font_name = font_name
         self.font_size = font_size
@@ -44,6 +45,7 @@ class SubtitleConfig:
         self.margin_l = margin_l
         self.margin_r = margin_r
         self.max_line_chars = max_line_chars
+        self.fonts_dir = str(Path(fonts_dir).resolve()) if fonts_dir else None
 
     def get_alignment_code(self) -> int:
         """
@@ -208,12 +210,17 @@ def normalize_srt_to_utf8(
 
 def build_subtitles_filter(
     clean_srt_path: str | Path,
-    config: SubtitleConfig
+    config: SubtitleConfig,
+    fonts_dir: Optional[str | Path] = None
 ) -> str:
     """
     Generates a properly-escaped subtitles filter for FFmpeg:
-    subtitles='<escaped_path>':force_style='<style_str>'
+    subtitles='<escaped_path>':fontsdir='<escaped_fontsdir>':force_style='<style_str>'
     """
     escaped_path = escape_ffmpeg_filter_path(clean_srt_path)
     style_str = config.to_force_style_str()
+    effective_fonts_dir = fonts_dir or config.fonts_dir
+    if effective_fonts_dir and Path(effective_fonts_dir).is_dir():
+        escaped_fontsdir = escape_ffmpeg_filter_path(effective_fonts_dir)
+        return f"subtitles='{escaped_path}':fontsdir='{escaped_fontsdir}':force_style='{style_str}'"
     return f"subtitles='{escaped_path}':force_style='{style_str}'"

@@ -8,9 +8,10 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon, QFontDatabase
 from PySide6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QComboBox, QSpinBox
+    QComboBox, QSpinBox, QPushButton, QFileDialog
 )
 
+from app.core.font_manager import FontManager
 from app.core.subtitle_processor import SubtitleConfig, SubtitlePosition
 
 
@@ -30,6 +31,8 @@ class SubtitleCardWidget(QFrame):
         super().__init__(parent)
         self.icons_dir = icons_dir
         self.setProperty("class", "CardFrame")
+        self.project_root = self.icons_dir.parent.parent
+        self.font_manager = FontManager(self.project_root / "resources" / "fonts")
         self._init_ui()
 
     def _init_ui(self):
@@ -53,15 +56,24 @@ class SubtitleCardWidget(QFrame):
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(10)
 
-        # 1. Font Family
+        # 1. Font Family & Add Font Button
         grid.addWidget(QLabel("中文字体:"), 0, 0)
+        font_layout = QHBoxLayout()
+        font_layout.setSpacing(6)
+
         self.combo_font = QComboBox()
-        # Enumerate system fonts or default to common
-        installed_families = set(QFontDatabase.families())
-        for f in WINDOWS_COMMON_FONTS:
-            self.combo_font.addItem(f)
+        self._refresh_font_list()
         self.combo_font.currentTextChanged.connect(self._update_preview)
-        grid.addWidget(self.combo_font, 0, 1)
+        font_layout.addWidget(self.combo_font, 1)
+
+        self.btn_add_font = QPushButton("添加新字体")
+        self.btn_add_font.setIcon(QIcon(str(self.icons_dir / "plus.svg")))
+        self.btn_add_font.setIconSize(QSize(13, 13))
+        self.btn_add_font.setToolTip("选择外部 TTF / OTF / TTC 字体文件导入并在视频渲染中使用")
+        self.btn_add_font.clicked.connect(self._on_add_font_clicked)
+        font_layout.addWidget(self.btn_add_font)
+
+        grid.addLayout(font_layout, 0, 1)
 
         # 2. Font Size
         grid.addWidget(QLabel("字幕字号:"), 0, 2)
@@ -93,6 +105,12 @@ class SubtitleCardWidget(QFrame):
 
         layout.addLayout(grid)
 
+        # Font Status Message Label
+        self.lbl_font_status = QLabel("")
+        self.lbl_font_status.setProperty("class", "SubText")
+        self.lbl_font_status.setVisible(False)
+        layout.addWidget(self.lbl_font_status)
+
         # Live Mini Preview Frame (Simulates 9:16 layout)
         self.preview_frame = QFrame()
         self.preview_frame.setProperty("class", "SubCardFrame")
@@ -106,6 +124,45 @@ class SubtitleCardWidget(QFrame):
 
         layout.addWidget(self.preview_frame)
         self._update_preview()
+
+    def _refresh_font_list(self):
+        """Populates combo_font with custom and standard fonts."""
+        current = self.combo_font.currentText()
+        self.combo_font.blockSignals(True)
+        self.combo_font.clear()
+        fonts = self.font_manager.get_available_fonts()
+        for f in fonts:
+            self.combo_font.addItem(f)
+        if current and self.combo_font.findText(current) != -1:
+            self.combo_font.setCurrentText(current)
+        elif self.combo_font.findText("Microsoft YaHei") != -1:
+            self.combo_font.setCurrentText("Microsoft YaHei")
+        self.combo_font.blockSignals(False)
+
+    def _on_add_font_clicked(self):
+        """Opens file dialog for user to select and import new font file."""
+        f, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择自定义字体文件",
+            "",
+            "字体文件 (*.ttf *.otf *.ttc *.woff *.woff2);;所有文件 (*.*)"
+        )
+        if not f:
+            return
+
+        ok, msg, families = self.font_manager.import_font_file(f)
+        if ok and families:
+            self._refresh_font_list()
+            primary_family = families[0]
+            self.combo_font.setCurrentText(primary_family)
+            self.lbl_font_status.setText(f"已添加并应用新字体: {primary_family} ({Path(f).name})")
+            self.lbl_font_status.setStyleSheet("color: #34d399; font-size: 11px; font-weight: 500;")
+            self.lbl_font_status.setVisible(True)
+            self._update_preview()
+        else:
+            self.lbl_font_status.setText(f"字体导入失败: {msg}")
+            self.lbl_font_status.setStyleSheet("color: #f87171; font-size: 11px;")
+            self.lbl_font_status.setVisible(True)
 
     def _update_preview(self):
         font_name = self.combo_font.currentText()
@@ -140,5 +197,6 @@ class SubtitleCardWidget(QFrame):
             margin_v=0 if pos == SubtitlePosition.CENTER else (80 if pos == SubtitlePosition.BOTTOM else 40),
             margin_l=30,
             margin_r=30,
-            max_line_chars=24
+            max_line_chars=24,
+            fonts_dir=str(self.font_manager.fonts_dir)
         )
