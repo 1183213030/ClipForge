@@ -28,7 +28,11 @@ def main():
     app.setApplicationName("ClipForge")
     app.setOrganizationName("ClipForge")
 
-    project_root = Path(__file__).resolve().parent
+    if getattr(sys, "frozen", False):
+        project_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    else:
+        project_root = Path(__file__).resolve().parent
+
     icon_path = project_root / "resources" / "icons" / "logo.png"
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))

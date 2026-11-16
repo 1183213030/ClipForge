@@ -29,6 +29,7 @@ wheels/
 # PyInstaller
 *.manifest
 *.spec
+!ClipForge.spec
 
 # Application runtime outputs
 temp/*

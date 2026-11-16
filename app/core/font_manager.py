@@ -6,6 +6,7 @@ Handles scanning, importing, Qt application font registration, and FFmpeg font d
 import logging
 from pathlib import Path
 import shutil
+import sys
 from typing import Optional, List, Tuple, Dict
 
 from PySide6.QtGui import QFontDatabase
@@ -31,8 +32,12 @@ class FontManager:
 
     def __init__(self, fonts_dir: Optional[Path] = None):
         if fonts_dir is None:
-            project_root = Path(__file__).resolve().parent.parent.parent
-            self.fonts_dir = project_root / "resources" / "fonts"
+            if getattr(sys, "frozen", False):
+                exe_dir = Path(sys.executable).parent
+                self.fonts_dir = exe_dir / "resources" / "fonts"
+            else:
+                project_root = Path(__file__).resolve().parent.parent.parent
+                self.fonts_dir = project_root / "resources" / "fonts"
         else:
             self.fonts_dir = Path(fonts_dir).resolve()
 
@@ -44,25 +49,30 @@ class FontManager:
     def scan_fonts(self) -> Dict[str, Path]:
         """Scans fonts_dir for font files and registers them into QFontDatabase."""
         app = QApplication.instance()
-        if not self.fonts_dir.is_dir():
-            return self.custom_fonts
+        search_dirs = [self.fonts_dir]
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            bundled_fonts = Path(sys._MEIPASS) / "resources" / "fonts"
+            if bundled_fonts != self.fonts_dir and bundled_fonts.is_dir():
+                search_dirs.append(bundled_fonts)
 
-        for f in self.fonts_dir.iterdir():
-            if f.is_file() and f.suffix.lower() in SUPPORTED_FONT_EXTENSIONS:
-                try:
-                    if app:
-                        font_id = QFontDatabase.addApplicationFont(str(f))
-                        if font_id != -1:
-                            families = QFontDatabase.applicationFontFamilies(font_id)
-                            for fam in families:
-                                self.custom_fonts[fam] = f
+        for d in search_dirs:
+            if not d.is_dir():
+                continue
+            for f in d.iterdir():
+                if f.is_file() and f.suffix.lower() in SUPPORTED_FONT_EXTENSIONS:
+                    try:
+                        if app:
+                            font_id = QFontDatabase.addApplicationFont(str(f))
+                            if font_id != -1:
+                                families = QFontDatabase.applicationFontFamilies(font_id)
+                                for fam in families:
+                                    self.custom_fonts[fam] = f
+                            else:
+                                self.custom_fonts[f.stem] = f
                         else:
-                            # Fallback using stem name if registration returned -1
                             self.custom_fonts[f.stem] = f
-                    else:
-                        self.custom_fonts[f.stem] = f
-                except Exception as e:
-                    logger.warning("注册字体文件失败: %s, 错误: %s", f.name, e)
+                    except Exception as e:
+                        logger.warning("注册字体文件失败: %s, 错误: %s", f.name, e)
 
         return self.custom_fonts
 

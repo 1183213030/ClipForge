@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 from typing import Callable, Optional
 
 
@@ -19,22 +20,30 @@ def find_ffmpeg_binaries() -> tuple[Optional[str], Optional[str]]:
     """
     Locates ffmpeg and ffprobe executables in order of precedence:
     1. <project_root>/bin/ffmpeg.exe (and ffprobe.exe)
-    2. Python imageio-ffmpeg bundle (for ffmpeg)
-    3. System PATH
+    2. PyInstaller bundled _MEIPASS/bin or executable dir
+    3. Python imageio-ffmpeg bundle (for ffmpeg)
+    4. System PATH
     """
-    project_root = Path(__file__).resolve().parent.parent.parent
-    local_bin = project_root / "bin"
-    
     ffmpeg_path: Optional[str] = None
     ffprobe_path: Optional[str] = None
-    
-    # 1. Local bin folder
-    local_ffmpeg = local_bin / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-    local_ffprobe = local_bin / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
-    if local_ffmpeg.is_file():
-        ffmpeg_path = str(local_ffmpeg)
-    if local_ffprobe.is_file():
-        ffprobe_path = str(local_ffprobe)
+
+    if getattr(sys, "frozen", False):
+        candidate_roots = [
+            Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)),
+            Path(sys.executable).parent
+        ]
+    else:
+        candidate_roots = [Path(__file__).resolve().parent.parent.parent]
+
+    # 1. Check local bin folders
+    for root in candidate_roots:
+        local_bin = root / "bin"
+        local_ffmpeg = local_bin / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        local_ffprobe = local_bin / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
+        if not ffmpeg_path and local_ffmpeg.is_file():
+            ffmpeg_path = str(local_ffmpeg)
+        if not ffprobe_path and local_ffprobe.is_file():
+            ffprobe_path = str(local_ffprobe)
         
     # 2. imageio-ffmpeg for ffmpeg if not found in local bin
     if not ffmpeg_path:

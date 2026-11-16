@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize, QTimer
@@ -34,11 +35,19 @@ from app.utils.path_utils import normalize_path, ensure_dir
 class MainWindow(QMainWindow):
     def __init__(self, project_root: Optional[Path] = None):
         super().__init__()
-        self.project_root = project_root or Path(__file__).resolve().parent.parent.parent
-        self.icons_dir = self.project_root / "resources" / "icons"
-        self.default_output_dir = ensure_dir(self.project_root / "output")
+        if getattr(sys, "frozen", False):
+            base_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+            exe_dir = Path(sys.executable).parent
+            self.project_root = project_root or base_dir
+            self.icons_dir = self.project_root / "resources" / "icons"
+            self.default_output_dir = ensure_dir(exe_dir / "output")
+            self.task_service = TaskService(log_dir=exe_dir / "logs")
+        else:
+            self.project_root = project_root or Path(__file__).resolve().parent.parent.parent
+            self.icons_dir = self.project_root / "resources" / "icons"
+            self.default_output_dir = ensure_dir(self.project_root / "output")
+            self.task_service = TaskService(log_dir=self.project_root / "logs")
 
-        self.task_service = TaskService(log_dir=self.project_root / "logs")
         self.export_thread: Optional[BatchExportThread] = None
         self.task_widgets: dict[str, TaskItemWidget] = {}
         self.latest_manifest_path: Optional[Path] = None
