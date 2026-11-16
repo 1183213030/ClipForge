@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 import re
 from typing import Optional
+import uuid
 
 from app.utils.path_utils import escape_ffmpeg_filter_path, ensure_dir
 
@@ -201,9 +202,9 @@ def normalize_srt_to_utf8(
 
     cleaned_content = "\n\n".join(cleaned_blocks) + "\n"
 
-    # Ensure UTF-8 clean file
+    # Ensure UTF-8 clean file with isolated UUID to prevent multi-task write collision
     out_dir = ensure_dir(temp_dir)
-    target_path = out_dir / f"clean_{raw_path.stem}.srt"
+    target_path = out_dir / f"clean_{raw_path.stem}_{uuid.uuid4().hex[:8]}.srt"
     target_path.write_text(cleaned_content, encoding="utf-8")
     return str(target_path)
 

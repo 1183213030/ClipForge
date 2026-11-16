@@ -7,6 +7,7 @@ isolated error handling, cancellation token binding, task retry, and export mani
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import concurrent.futures
 import json
 from pathlib import Path
 import threading
@@ -218,19 +219,49 @@ class TaskService:
 
     def _process_queue_internal(self):
         try:
-            while True:
-                # Find next pending task
-                next_task: Optional[TaskRecord] = None
-                with self._lock:
-                    for t in self.tasks:
-                        if t.state == TaskState.PENDING:
-                            next_task = t
+            workers_count = max(1, self.max_workers)
+            if workers_count == 1:
+                # Serial mode: sequential execution
+                while True:
+                    next_task: Optional[TaskRecord] = None
+                    with self._lock:
+                        for t in self.tasks:
+                            if t.state == TaskState.PENDING:
+                                next_task = t
+                                break
+                    if not next_task:
+                        break
+                    self._execute_single_task(next_task)
+            else:
+                # Concurrent multi-worker mode: parallel execution up to workers_count
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers_count) as executor:
+                    active_futures: dict[concurrent.futures.Future, TaskRecord] = {}
+
+                    while True:
+                        with self._lock:
+                            pending_tasks = [t for t in self.tasks if t.state == TaskState.PENDING]
+
+                            while pending_tasks and len(active_futures) < workers_count:
+                                task_to_run = pending_tasks.pop(0)
+                                task_to_run.state = TaskState.RUNNING
+                                task_to_run.started_at = datetime.now().isoformat()
+                                task_to_run.progress = 0.0
+                                self._notify_task_update(task_to_run)
+                                self._notify_batch_update()
+
+                                fut = executor.submit(self._execute_single_task, task_to_run)
+                                active_futures[fut] = task_to_run
+
+                        if not active_futures:
                             break
 
-                if not next_task:
-                    break
-
-                self._execute_single_task(next_task)
+                        done, _ = concurrent.futures.wait(
+                            active_futures.keys(),
+                            timeout=0.2,
+                            return_when=concurrent.futures.FIRST_COMPLETED
+                        )
+                        for fut in done:
+                            active_futures.pop(fut, None)
         finally:
             with self._lock:
                 self._is_running_queue = False
@@ -239,18 +270,20 @@ class TaskService:
     def _execute_single_task(self, task: TaskRecord):
         # Check if already cancelled
         if task.token.is_cancelled:
-            task.state = TaskState.CANCELLED
-            task.completed_at = datetime.now().isoformat()
-            self._notify_task_update(task)
-            self._notify_batch_update()
+            with self._lock:
+                task.state = TaskState.CANCELLED
+                task.completed_at = datetime.now().isoformat()
+                self._notify_task_update(task)
+                self._notify_batch_update()
             return
 
         with self._lock:
-            task.state = TaskState.RUNNING
-            task.started_at = datetime.now().isoformat()
-            task.progress = 0.0
-            self._notify_task_update(task)
-            self._notify_batch_update()
+            if task.state != TaskState.RUNNING:
+                task.state = TaskState.RUNNING
+                task.started_at = datetime.now().isoformat()
+                task.progress = 0.0
+                self._notify_task_update(task)
+                self._notify_batch_update()
 
         start_time = time.time()
         self._log_task(task, f"Started execution of {task.task_id}")

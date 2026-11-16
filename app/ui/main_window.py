@@ -199,8 +199,19 @@ class MainWindow(QMainWindow):
         self.spin_count = QSpinBox()
         self.spin_count.setRange(1, 50)
         self.spin_count.setValue(3)
-        self.spin_count.setFixedWidth(80)
+        self.spin_count.setFixedWidth(75)
         row1.addWidget(self.spin_count)
+
+        row1.addSpacing(12)
+        row1.addWidget(QLabel("并行并发数:"))
+        self.spin_workers = QSpinBox()
+        max_cpu_workers = max(4, min(8, os.cpu_count() or 4))
+        self.spin_workers.setRange(1, max_cpu_workers)
+        self.spin_workers.setValue(2)
+        self.spin_workers.setFixedWidth(80)
+        self.spin_workers.setSuffix(" 任务")
+        self.spin_workers.setToolTip("设置同时并行渲染的任务数 (建议 2~4 任务，大幅缩短成片导出总耗时)")
+        row1.addWidget(self.spin_workers)
 
         row1.addSpacing(14)
         row1.addWidget(QLabel("输出目录:"))
@@ -373,6 +384,10 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_cancel_all.setEnabled(True)
         self.spin_count.setEnabled(False)
+        self.spin_workers.setEnabled(False)
+
+        # Set user-configured concurrency level
+        self.task_service.max_workers = self.spin_workers.value()
 
         self.export_thread = BatchExportThread(self.task_service)
         self.export_thread.sig_task_updated.connect(self._on_task_updated)
@@ -396,6 +411,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_cancel_all.setEnabled(False)
         self.spin_count.setEnabled(True)
+        self.spin_workers.setEnabled(True)
 
         # Generate manifest
         out_dir = self.input_output_dir.text()
@@ -422,8 +438,11 @@ class MainWindow(QMainWindow):
         ok = self.task_service.retry_task(task_id)
         if ok and (not self.export_thread or not self.export_thread.isRunning()):
             # Re-launch export worker for pending tasks
+            self.task_service.max_workers = self.spin_workers.value()
             self.btn_start.setEnabled(False)
             self.btn_cancel_all.setEnabled(True)
+            self.spin_count.setEnabled(False)
+            self.spin_workers.setEnabled(False)
             self.export_thread = BatchExportThread(self.task_service)
             self.export_thread.sig_task_updated.connect(self._on_task_updated)
             self.export_thread.sig_batch_updated.connect(self._on_batch_updated)
