@@ -4,6 +4,7 @@ Generates unique, multi-round de-duplicated video assembly plans
 matching novel audio duration with minimum sequence repetition across batches.
 """
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 import random
 from typing import Optional
@@ -83,13 +84,16 @@ class Randomizer:
         self,
         clips: list[ClipInfo],
         target_duration: float,
+        opening_clip: Optional[ClipInfo] = None,
+        global_usage: Optional[dict[str, int]] = None,
         min_segment_duration: Optional[float] = None,
         max_segment_duration: Optional[float] = None,
         randomize_start: bool = False
     ) -> tuple[list[TimelineSegment], list[str], list[str]]:
         """
         Builds a single assembly candidate:
-        - Shuffles clips per round.
+        - Pins opening_clip as the first segment if provided (guaranteeing unique openers across batches).
+        - Prioritizes globally least-used clips across the batch to minimize scene overlap across videos.
         - Avoids repeating last item of round K as first item of round K+1.
         - Truncates last segment to exactly fit remaining duration.
         - Optionally slices clips into micro-segments with varied start times.
@@ -102,15 +106,65 @@ class Randomizer:
         round_num = 1
         last_clip_sha: Optional[str] = None
 
-        while accumulated < target_duration - 1e-4:
-            current_pool = clips.copy()
-            self.rng.shuffle(current_pool)
+        # 1. Handle specified opening clip
+        if opening_clip is not None:
+            remaining = round(target_duration - accumulated, 3)
+            if min_segment_duration is not None and max_segment_duration is not None:
+                high_dur = min(max_segment_duration, opening_clip.duration, remaining)
+                low_dur = min(min_segment_duration, high_dur)
+                use_dur = round(self.rng.uniform(low_dur, high_dur), 3)
+                max_start = max(0.0, opening_clip.duration - use_dur)
+                start_time = round(self.rng.uniform(0.0, max_start), 3) if (randomize_start and max_start > 0) else 0.0
+            else:
+                use_dur = min(opening_clip.duration, remaining)
+                start_time = 0.0
 
-            # Prevent adjacent round boundary repetition (round K end == round K+1 start)
-            if round_num > 1 and len(current_pool) >= 2 and current_pool[0].sha256 == last_clip_sha:
-                # Swap first item with another one
-                swap_idx = self.rng.randint(1, len(current_pool) - 1)
-                current_pool[0], current_pool[swap_idx] = current_pool[swap_idx], current_pool[0]
+            segments.append(
+                TimelineSegment(
+                    clip_path=opening_clip.path,
+                    clip_sha256=opening_clip.sha256,
+                    display_name=opening_clip.display_name,
+                    start_time=start_time,
+                    duration=round(use_dur, 3)
+                )
+            )
+            clip_sequence.append(opening_clip.display_name)
+            accumulated = round(accumulated + use_dur, 3)
+            last_clip_sha = opening_clip.sha256
+
+        # Helper to sort clips by global usage tiers, randomizing within each tier
+        def get_tiered_pool(candidate_list: list[ClipInfo]) -> list[ClipInfo]:
+            if not global_usage:
+                pool = candidate_list.copy()
+                self.rng.shuffle(pool)
+                return pool
+            by_usage: dict[int, list[ClipInfo]] = defaultdict(list)
+            for c in candidate_list:
+                by_usage[global_usage.get(c.sha256, 0)].append(c)
+            pool: list[ClipInfo] = []
+            for u in sorted(by_usage.keys()):
+                tier = by_usage[u].copy()
+                self.rng.shuffle(tier)
+                pool.extend(tier)
+            return pool
+
+        # 2. Fill the remainder of target_duration
+        # For round 1: exclude the opening_clip if there are other clips available
+        first_round_candidates = [
+            c for c in clips if c.sha256 != (opening_clip.sha256 if opening_clip else None)
+        ]
+        if not first_round_candidates:
+            first_round_candidates = clips.copy()
+
+        current_pool = get_tiered_pool(first_round_candidates)
+
+        while accumulated < target_duration - 1e-4:
+            if round_num > 1:
+                current_pool = get_tiered_pool(clips)
+                # Prevent adjacent round boundary repetition (round K end == round K+1 start)
+                if len(current_pool) >= 2 and current_pool[0].sha256 == last_clip_sha:
+                    swap_idx = self.rng.randint(1, len(current_pool) - 1)
+                    current_pool[0], current_pool[swap_idx] = current_pool[swap_idx], current_pool[0]
 
             for clip in current_pool:
                 remaining = round(target_duration - accumulated, 3)
@@ -176,8 +230,10 @@ class Randomizer:
         randomize_start: bool = False
     ) -> list[TimelinePlan]:
         """
-        Generates 'count' distinct assembly plans, using previous_plans to minimize similarity.
-        Gracefully handles small clip pools without infinite loops.
+        Generates 'count' distinct assembly plans:
+        1. Guarantees 100% unique opening clips across all videos when len(clips) >= count.
+        2. Applies global clip dispersion across the entire batch to minimize footage overlap between videos.
+        3. Minimizes sequence similarity against previous_plans and earlier batch plans.
         """
         if not clips:
             raise ValueError("可用素材列表为空，无法生成组合计划。")
@@ -189,22 +245,43 @@ class Randomizer:
         all_plans: list[TimelinePlan] = list(previous_plans or [])
         new_plans: list[TimelinePlan] = []
 
-        # Theoretical distinct permutations estimation
         n = len(clips)
         is_severely_constrained = (n <= 2 and count > n)
 
+        # 1. Allocate opening clips across the batch
+        # When len(clips) >= count, strictly sample distinct openers (zero opener duplicate)
+        if n >= count:
+            opening_clips = self.rng.sample(clips, count)
+        else:
+            # If clips < count, cycle shuffled batches so maximum distinct openers are used before reuse
+            openers_pool: list[ClipInfo] = []
+            while len(openers_pool) < count:
+                shuffled_batch = clips.copy()
+                self.rng.shuffle(shuffled_batch)
+                openers_pool.extend(shuffled_batch)
+            opening_clips = openers_pool[:count]
+
+        # 2. Track global clip usage across the batch (seed with previous_plans if any)
+        global_usage: dict[str, int] = defaultdict(int)
+        for p in all_plans:
+            for s in p.segments:
+                global_usage[s.clip_sha256] += 1
+
+        # 3. Generate each plan
         for i in range(count):
+            opener = opening_clips[i]
             plan_id = len(all_plans) + 1
             best_candidate: Optional[tuple[list[TimelineSegment], list[str], list[str]]] = None
             lowest_max_similarity = 2.0  # similarity in [0.0, 1.0]
 
-            # Generate multiple candidates and select the one most dissimilar to all existing plans
             attempts = 1 if is_severely_constrained and n == 1 else max_candidate_attempts
 
             for _ in range(attempts):
                 segments, seq, notes = self.generate_single_candidate(
-                    clips,
-                    target_duration,
+                    clips=clips,
+                    target_duration=target_duration,
+                    opening_clip=opener,
+                    global_usage=global_usage,
                     min_segment_duration=min_segment_duration,
                     max_segment_duration=max_segment_duration,
                     randomize_start=randomize_start
@@ -223,7 +300,6 @@ class Randomizer:
                     lowest_max_similarity = max_sim
                     best_candidate = (segments, seq, notes)
 
-                # If candidate is completely distinct (0.0 similarity), stop search early
                 if lowest_max_similarity == 0.0:
                     break
 
@@ -231,10 +307,30 @@ class Randomizer:
             final_segments, final_seq, final_notes = best_candidate
             uniqueness_score = round(1.0 - min(lowest_max_similarity, 1.0), 4)
 
+            # Record human-readable note about opening clip and dispersion
+            opener_name = final_segments[0].display_name if final_segments else ""
+            final_notes.insert(0, f"首镜头专属分配: {opener_name} (批次内首发互斥不重复)")
+
+            # Record overlap statistics against earlier plans in the batch
+            if all_plans:
+                current_clip_set = set(final_seq)
+                max_overlap = max(
+                    len(current_clip_set.intersection(set(p.clip_sequence)))
+                    for p in all_plans
+                )
+                if max_overlap == 0:
+                    final_notes.append("跨视频素材完全独立 (与此前成片零重合)")
+                else:
+                    final_notes.append(f"跨视频最大重合镜头数: {max_overlap}/{len(current_clip_set)} (全局均衡分散)")
+
             if is_severely_constrained:
                 final_notes.append(
                     f"可用素材数量极少 (N={n})，已达到独立组合数学上限，允许部分顺序复用"
                 )
+
+            # Update global usage with chosen candidate's segments
+            for seg in final_segments:
+                global_usage[seg.clip_sha256] += 1
 
             plan = TimelinePlan(
                 plan_id=plan_id,
