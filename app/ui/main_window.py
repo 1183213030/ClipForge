@@ -19,10 +19,11 @@ from PySide6.QtWidgets import (
     QProgressBar, QScrollArea, QMessageBox, QFrame, QStackedWidget
 )
 
+from app.core.media_probe import probe_media
 from app.core.timeline_builder import TimelineBuilder
 from app.core.edit_project import EditProject, create_project
 from app.services.task_service import TaskService, TaskRecord, BatchStatistics, TaskState
-from app.ui.threads import BatchExportThread
+from app.ui.threads import BatchExportThread, DetectHardwareThread
 from app.ui.pages.workbench_page import WorkbenchPage
 from app.ui.widgets.asset_card import AssetCardWidget
 from app.ui.widgets.subtitle_card import SubtitleCardWidget
@@ -49,12 +50,15 @@ class MainWindow(QMainWindow):
             self.task_service = TaskService(log_dir=self.project_root / "logs")
 
         self.export_thread: Optional[BatchExportThread] = None
+        self._hw_detect_thread: Optional[DetectHardwareThread] = None
+        self._user_changed_workers: bool = False
         self.task_widgets: dict[str, TaskItemWidget] = {}
         self.latest_manifest_path: Optional[Path] = None
 
         self._init_window()
         self._init_ui()
         self._load_theme()
+        self._start_hw_detection()
 
     def _init_window(self):
         self.setWindowTitle("ClipForge - 解压短视频全自动混剪工作台")
@@ -210,7 +214,8 @@ class MainWindow(QMainWindow):
         self.spin_workers.setValue(2)
         self.spin_workers.setFixedWidth(80)
         self.spin_workers.setSuffix(" 任务")
-        self.spin_workers.setToolTip("设置同时并行渲染的任务数 (建议 2~4 任务，大幅缩短成片导出总耗时)")
+        self.spin_workers.setToolTip("设置同时并行渲染的任务数 (建议 2~4 任务，配合硬件加速可大幅缩短总耗时)")
+        self.spin_workers.valueChanged.connect(self._on_workers_spin_changed)
         row1.addWidget(self.spin_workers)
 
         row1.addSpacing(14)
@@ -272,6 +277,14 @@ class MainWindow(QMainWindow):
         self.overall_progress_bar.setValue(0)
         layout.addWidget(self.overall_progress_bar)
 
+        # Prewarm cache status banner (shown only during batch clip pre-standardization)
+        self.lbl_prewarm_status = QLabel("")
+        self.lbl_prewarm_status.setStyleSheet(
+            "color: #60a5fa; font-size: 12px; font-weight: 500; padding: 2px 0;"
+        )
+        self.lbl_prewarm_status.hide()
+        layout.addWidget(self.lbl_prewarm_status)
+
         # Status Badges
         stats_row = QHBoxLayout()
         self.lbl_stat_total = QLabel("总任务: 0")
@@ -306,6 +319,23 @@ class MainWindow(QMainWindow):
 
         return card
 
+    def _start_hw_detection(self):
+        """Probes available GPU hardware encoder asynchronously on startup."""
+        self._hw_detect_thread = DetectHardwareThread(self)
+        self._hw_detect_thread.sig_detected.connect(self._on_hw_detected)
+        self._hw_detect_thread.start()
+
+    def _on_hw_detected(self, profile, rec_workers: int):
+        self.video_card.set_detected_hardware(profile)
+        if not self._user_changed_workers and rec_workers >= 1:
+            clamped = min(max(1, rec_workers), self.spin_workers.maximum())
+            self.spin_workers.blockSignals(True)
+            self.spin_workers.setValue(clamped)
+            self.spin_workers.blockSignals(False)
+
+    def _on_workers_spin_changed(self, _val: int):
+        self._user_changed_workers = True
+
     def _browse_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择成品输出目录")
         if d:
@@ -331,13 +361,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "输入检查", "指定的输出目录不存在或不可写！")
             return
 
-        # 2. Build TimelinePlans
+        # 2. Build TimelinePlans reusing existing scan result (no redundant disk scan / SHA-256!)
         try:
             builder = TimelineBuilder()
-            _, audio_dur, plans = builder.build_plans_from_inputs(
-                clips_folder=self.asset_card.video_folder,
-                audio_path=audio_path,
-                count=count
+            audio_dur = self.asset_card.audio_duration
+            if audio_dur <= 0:
+                audio_meta = probe_media(audio_path)
+                if not audio_meta.is_valid_audio:
+                    raise ValueError(f"小说音频文件无效或无法读取: {audio_path}")
+                audio_dur = audio_meta.duration
+                self.asset_card.audio_duration = audio_dur
+
+            plans = builder.build_plans_from_scan(
+                scan_res=scan_res,
+                audio_duration=audio_dur,
+                count=count,
             )
         except Exception as e:
             QMessageBox.critical(self, "组合计划生成失败", f"构建视频编排时间轴失败:\n{str(e)}")
@@ -392,10 +430,25 @@ class MainWindow(QMainWindow):
         self.export_thread = BatchExportThread(self.task_service)
         self.export_thread.sig_task_updated.connect(self._on_task_updated)
         self.export_thread.sig_batch_updated.connect(self._on_batch_updated)
+        self.export_thread.sig_prewarm_progress.connect(self._on_prewarm_progress)
         self.export_thread.sig_finished.connect(self._on_batch_finished)
         self.export_thread.start()
 
+    def _on_prewarm_progress(self, done: int, total: int, clip_name: str):
+        if done < total:
+            self.lbl_prewarm_status.setText(
+                f"正在并行预处理加速缓存 ({done}/{total}): {clip_name}"
+            )
+            self.lbl_prewarm_status.show()
+        else:
+            self.lbl_prewarm_status.setText(
+                f"素材加速缓存已就绪 ({total}/{total})，正在高速并行渲染..."
+            )
+            self.lbl_prewarm_status.show()
+
     def _on_task_updated(self, task: TaskRecord):
+        if task.state == TaskState.RUNNING and task.progress > 0.01:
+            self.lbl_prewarm_status.hide()
         widget = self.task_widgets.get(task.task_id)
         if widget:
             widget.update_task_state(task)
@@ -408,6 +461,7 @@ class MainWindow(QMainWindow):
         self.lbl_stat_failed.setText(f"失败: {stats.failed}")
 
     def _on_batch_finished(self, stats: BatchStatistics):
+        self.lbl_prewarm_status.hide()
         self.btn_start.setEnabled(True)
         self.btn_cancel_all.setEnabled(False)
         self.spin_count.setEnabled(True)
@@ -446,6 +500,7 @@ class MainWindow(QMainWindow):
             self.export_thread = BatchExportThread(self.task_service)
             self.export_thread.sig_task_updated.connect(self._on_task_updated)
             self.export_thread.sig_batch_updated.connect(self._on_batch_updated)
+            self.export_thread.sig_prewarm_progress.connect(self._on_prewarm_progress)
             self.export_thread.sig_finished.connect(self._on_batch_finished)
             self.export_thread.start()
 

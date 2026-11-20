@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 from typing import Callable, Optional
 
+from app.core.clip_cache import ClipStandardizationCache
 from app.core.media_probe import probe_media, MediaMetadata
 from app.core.randomizer import TimelinePlan
 from app.core.timeline_builder import TimelineBuilder
@@ -40,7 +41,11 @@ class RenderTaskParams:
 class ExportManager:
     def __init__(self, temp_base_dir: str | Path = "temp"):
         self.temp_base_dir = ensure_dir(temp_base_dir)
-        self.video_processor = VideoProcessor(temp_dir=self.temp_base_dir / "processor_temp")
+        self.clip_cache = ClipStandardizationCache(cache_dir=self.temp_base_dir / "clip_cache")
+        self.video_processor = VideoProcessor(
+            temp_dir=self.temp_base_dir / "processor_temp",
+            clip_cache=self.clip_cache,
+        )
 
     def resolve_unique_output_path(self, target_dir: Path, filename: str) -> Path:
         """Resolves filename conflicts by appending index e.g. name_1.mp4."""

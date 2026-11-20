@@ -45,15 +45,38 @@ class TimelineBuilder:
         audio_duration = audio_meta.duration
 
         # 3. Randomize and build plans
-        randomizer = Randomizer(seed=self.seed)
-        plans = randomizer.generate_batch_plans(
-            clips=scan_res.valid_clips,
-            target_duration=audio_duration,
+        plans = self.build_plans_from_scan(
+            scan_res=scan_res,
+            audio_duration=audio_duration,
             count=count,
             previous_plans=previous_plans
         )
 
         return scan_res, audio_duration, plans
+
+    def build_plans_from_scan(
+        self,
+        scan_res: ScanResult,
+        audio_duration: float,
+        count: int,
+        previous_plans: Optional[list[TimelinePlan]] = None,
+    ) -> list[TimelinePlan]:
+        """
+        Generates 'count' distinct TimelinePlans directly from an existing ScanResult
+        and probed audio duration, avoiding redundant disk scanning and SHA-256 hashing.
+        """
+        if not scan_res or not scan_res.valid_clips:
+            raise ValueError("扫描结果中未包含任何有效视频素材。")
+        if audio_duration <= 0:
+            raise ValueError(f"小说音频时长无效: {audio_duration}")
+
+        randomizer = Randomizer(seed=self.seed)
+        return randomizer.generate_batch_plans(
+            clips=scan_res.valid_clips,
+            target_duration=audio_duration,
+            count=count,
+            previous_plans=previous_plans
+        )
 
     @staticmethod
     def plan_to_video_segments(plan: TimelinePlan) -> list[VideoSegment]:

@@ -1,6 +1,7 @@
 """
 Video Settings Card Widget for ClipForge.
-Displays standardized video specifications and provides bitrate tier selection.
+Displays standardized video specifications and provides bitrate tier,
+hardware acceleration engine, and clip pre-standardization cache controls.
 """
 
 from pathlib import Path
@@ -8,9 +9,10 @@ from typing import Optional
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox
+    QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox, QCheckBox
 )
 
+from app.core.hw_encoder import EncoderProfile
 from app.core.subtitle_processor import SubtitleConfig
 from app.core.video_processor import ExportOptions
 
@@ -31,11 +33,15 @@ class VideoCardWidget(QFrame):
         header_layout = QHBoxLayout()
         icon_lbl = QLabel()
         icon_lbl.setPixmap(QIcon(str(self.icons_dir / "film.svg")).pixmap(QSize(18, 18)))
-        title_lbl = QLabel("视频规格与码率设置")
+        title_lbl = QLabel("视频规格与加速设置")
         title_lbl.setProperty("class", "SectionTitle")
         header_layout.addWidget(icon_lbl)
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
+
+        self.lbl_hw_badge = QLabel("正在检测加速引擎...")
+        self.lbl_hw_badge.setProperty("class", "BadgePending")
+        header_layout.addWidget(self.lbl_hw_badge)
         layout.addLayout(header_layout)
 
         # Specifications Grid
@@ -75,7 +81,43 @@ class VideoCardWidget(QFrame):
         self.combo_bitrate.setCurrentIndex(1)  # Default 4M
         grid.addWidget(self.combo_bitrate, 2, 1, 1, 3)
 
+        # Hardware / Speed encoding mode row
+        grid.addWidget(QLabel("编码加速引擎:"), 3, 0)
+        self.combo_encode_mode = QComboBox()
+        self.combo_encode_mode.addItem("智能硬件加速 (自动 · 推荐)", "auto")
+        self.combo_encode_mode.addItem("CPU 极速软编 (veryfast)", "cpu_fast")
+        self.combo_encode_mode.addItem("CPU 标准软编 (fast)", "cpu_quality")
+        self.combo_encode_mode.setCurrentIndex(0)
+        grid.addWidget(self.combo_encode_mode, 3, 1, 1, 3)
+
         layout.addLayout(grid)
+
+        # Clip standardization cache toggle
+        self.chk_clip_cache = QCheckBox("启用素材预标准化缓存 (多条混剪与 4K 显著提速)")
+        self.chk_clip_cache.setChecked(True)
+        self.chk_clip_cache.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.chk_clip_cache.setToolTip(
+            "首次导出前一次性将源素材标准化为 1080x1920@30fps 中间缓存，后续多条视频与二次导出直接复用，避免重复 4K 软解与缩放"
+        )
+        layout.addWidget(self.chk_clip_cache)
+
+    def set_detected_hardware(self, profile: Optional[EncoderProfile]):
+        """Updates the hardware acceleration status badge after background detection."""
+        if profile is not None and profile.is_hardware:
+            short_names = {
+                "h264_nvenc": "NVIDIA NVENC",
+                "h264_qsv": "Intel QSV",
+                "h264_amf": "AMD AMF",
+                "h264_mf": "Win 硬件加速",
+            }
+            tag = short_names.get(profile.codec, profile.codec)
+            self.lbl_hw_badge.setText(f"GPU 就绪 · {tag}")
+            self.lbl_hw_badge.setProperty("class", "BadgeSuccess")
+        else:
+            self.lbl_hw_badge.setText("CPU 极速软编")
+            self.lbl_hw_badge.setProperty("class", "BadgeRunning")
+        self.lbl_hw_badge.style().unpolish(self.lbl_hw_badge)
+        self.lbl_hw_badge.style().polish(self.lbl_hw_badge)
 
     def get_export_options(
         self,
@@ -85,6 +127,8 @@ class VideoCardWidget(QFrame):
         fonts_dir: Optional[str] = None
     ) -> ExportOptions:
         bitrate_val = self.combo_bitrate.currentData() or "4M"
+        encode_mode = self.combo_encode_mode.currentData() or "auto"
+        preset_val = "fast" if encode_mode == "cpu_quality" else "veryfast"
         effective_fonts_dir = fonts_dir or (sub_config.fonts_dir if sub_config else None)
         return ExportOptions(
             output_width=1080,
@@ -93,9 +137,11 @@ class VideoCardWidget(QFrame):
             video_bitrate=bitrate_val,
             audio_bitrate="128k",
             audio_samplerate=44100,
-            preset="fast",
+            preset=preset_val,
             subtitle_config=sub_config,
             template_png_path=template_png_path,
             enable_template=enable_template,
-            fonts_dir=effective_fonts_dir
+            fonts_dir=effective_fonts_dir,
+            encode_mode=encode_mode,
+            use_clip_cache=self.chk_clip_cache.isChecked(),
         )

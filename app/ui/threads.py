@@ -9,6 +9,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from app.core.hw_encoder import detect_best_hw_encoder, get_recommended_worker_count
 from app.core.media_probe import probe_media, MediaMetadata
 from app.core.media_scanner import MediaScanner, ScanResult
 from app.core.video_processor import VideoProcessor, VideoSegment, ExportOptions, CancellationToken
@@ -120,9 +121,23 @@ class ProbeAudioThread(QThread):
             self.sig_error.emit(str(e))
 
 
+class DetectHardwareThread(QThread):
+    """Detects available hardware H.264 encoder asynchronously without blocking UI startup."""
+    sig_detected = Signal(object, int)  # Optional[EncoderProfile], recommended_workers
+
+    def run(self):
+        try:
+            hw = detect_best_hw_encoder()
+            rec_workers = get_recommended_worker_count()
+            self.sig_detected.emit(hw, rec_workers)
+        except Exception:
+            self.sig_detected.emit(None, 2)
+
+
 class BatchExportThread(QThread):
     sig_task_updated = Signal(object)      # TaskRecord
     sig_batch_updated = Signal(object)     # BatchStatistics
+    sig_prewarm_progress = Signal(int, int, str)  # done, total, clip_name
     sig_finished = Signal(object)          # BatchStatistics
 
     def __init__(self, task_service: TaskService, parent=None):
@@ -132,6 +147,7 @@ class BatchExportThread(QThread):
         # Bind TaskService internal callbacks to Qt thread-safe signals
         self.task_service.on_task_updated = lambda t: self.sig_task_updated.emit(t)
         self.task_service.on_batch_updated = lambda b: self.sig_batch_updated.emit(b)
+        self.task_service.on_prewarm_progress = lambda d, tot, name: self.sig_prewarm_progress.emit(d, tot, name)
 
     def run(self):
         try:

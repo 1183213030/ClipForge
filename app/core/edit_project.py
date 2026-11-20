@@ -95,6 +95,7 @@ class RenderSettings:
     margin_v: int = 100
     margin_l: int = 60
     margin_r: int = 60
+    encode_mode: str = "auto"
 
 
 @dataclass
@@ -597,7 +598,8 @@ class EditProject:
             subtitle_position=str(render_d.get("subtitle_position", "center")),
             margin_v=int(render_d.get("margin_v", 100)),
             margin_l=int(render_d.get("margin_l", 60)),
-            margin_r=int(render_d.get("margin_r", 60))
+            margin_r=int(render_d.get("margin_r", 60)),
+            encode_mode=str(render_d.get("encode_mode", "auto"))
         )
 
         export_history = [
@@ -687,7 +689,8 @@ class EditProject:
             subtitle_config=sub_cfg,
             template_png_path=tpl_p,
             enable_template=rs.enable_template,
-            fonts_dir=effective_fonts_dir
+            fonts_dir=effective_fonts_dir,
+            encode_mode=rs.encode_mode,
         )
 
     def export_edited_srt_file(self, target_srt_path: str | Path) -> str:

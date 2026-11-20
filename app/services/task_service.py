@@ -4,15 +4,19 @@ Coordinates serial task execution, weighted overall progress calculation,
 isolated error handling, cancellation token binding, task retry, and export manifest logging.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 import concurrent.futures
 import json
+import logging
+import os
 from pathlib import Path
 import threading
 import time
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 from app.core.export_manager import ExportManager, RenderTaskParams
 from app.core.randomizer import TimelinePlan
@@ -78,11 +82,13 @@ class TaskService:
         self.tasks: list[TaskRecord] = []
         self._lock = threading.RLock()
         self._is_running_queue = False
+        self._batch_cancelled = False
         self._queue_thread: Optional[threading.Thread] = None
 
         # Event callbacks
         self.on_task_updated: Optional[Callable[[TaskRecord], None]] = None
         self.on_batch_updated: Optional[Callable[[BatchStatistics], None]] = None
+        self.on_prewarm_progress: Optional[Callable[[int, int, str], None]] = None
 
     def create_batch(
         self,
@@ -180,6 +186,7 @@ class TaskService:
     def cancel_all(self):
         """Cancels all pending and running tasks."""
         with self._lock:
+            self._batch_cancelled = True
             for task in self.tasks:
                 if not task.is_finished:
                     self.cancel_task(task.task_id)
@@ -217,9 +224,117 @@ class TaskService:
             )
             self._queue_thread.start()
 
+    def _prewarm_batch_assets(self, pending_tasks: list[TaskRecord], workers_count: int):
+        """
+        Pre-standardizes unique video clips in parallel and pre-transcodes shared audio to AAC once
+        before the batch rendering workers start, avoiding redundant 4K decoding/scaling across tasks.
+        """
+        if not pending_tasks:
+            return
+
+        clip_cache = getattr(self.export_manager, "clip_cache", None)
+        if clip_cache is None:
+            return
+
+        # Group clips by (width, height, fps) for cacheable tasks
+        spec_to_clips: dict[tuple[int, int, int], list[str]] = {}
+        total_segments = 0
+        for t in pending_tasks:
+            if not t.options.use_clip_cache:
+                continue
+            spec = (t.options.output_width, t.options.output_height, t.options.fps)
+            bucket = spec_to_clips.setdefault(spec, [])
+            for seg in t.plan.segments:
+                bucket.append(seg.clip_path)
+                total_segments += 1
+
+        # Decide if clip prewarming pays off (multiple tasks, reused clips, or >= 4 segments)
+        for (w, h, fps), clip_paths in spec_to_clips.items():
+            if self._batch_cancelled:
+                return
+            unique_clips = list(dict.fromkeys(clip_paths))
+            should_prewarm = (
+                len(pending_tasks) >= 2
+                or total_segments > len(unique_clips)
+                or total_segments >= 4
+            )
+            if not should_prewarm:
+                # Also prewarm if any source clip is >1080p or >fps
+                for cp in unique_clips:
+                    try:
+                        sw, sh, sfps, _ = clip_cache.get_source_info(cp)
+                        if (sw * sh) > (w * h * 1.2) or sfps > fps + 5:
+                            should_prewarm = True
+                            break
+                    except Exception:
+                        continue
+
+            if should_prewarm and unique_clips:
+                try:
+                    clip_cache.prewarm_clips(
+                        clip_paths=unique_clips,
+                        width=w,
+                        height=h,
+                        fps=fps,
+                        on_progress=self._notify_prewarm_progress,
+                        cancel_check=lambda: self._batch_cancelled,
+                    )
+                except Exception as exc:
+                    logger.warning(f"批量素材预热缓存跳过，将按需渲染: {exc}")
+
+        if self._batch_cancelled:
+            return
+
+        # Pre-transcode shared audio to AAC once when >= 2 tasks reuse the same audio file
+        audio_groups: dict[tuple[str, str, int], list[TaskRecord]] = {}
+        for t in pending_tasks:
+            key = (normalize_path(t.audio_path), t.options.audio_bitrate, t.options.audio_samplerate)
+            audio_groups.setdefault(key, []).append(t)
+
+        for (audio_p, a_br, a_sr), group_tasks in audio_groups.items():
+            if self._batch_cancelled:
+                return
+            if len(group_tasks) >= 2:
+                prepared_aac = clip_cache.prepare_audio_aac(
+                    audio_path=audio_p,
+                    audio_bitrate=a_br,
+                    audio_samplerate=a_sr,
+                )
+                if prepared_aac:
+                    for gt in group_tasks:
+                        gt.options = replace(
+                            gt.options,
+                            prepared_audio_path=str(prepared_aac),
+                            audio_duration_hint=gt.target_duration if gt.target_duration > 0 else gt.options.audio_duration_hint,
+                        )
+
+        # Assign balanced per-worker CPU thread budgets when running multiple concurrent workers
+        if workers_count > 1:
+            cpu = os.cpu_count() or 4
+            per_worker_threads = max(2, cpu // workers_count)
+            for t in pending_tasks:
+                if t.options.max_threads is None:
+                    t.options = replace(t.options, max_threads=per_worker_threads)
+
+    def _notify_prewarm_progress(self, done: int, total: int, clip_name: str):
+        if self.on_prewarm_progress:
+            try:
+                self.on_prewarm_progress(done, total, clip_name)
+            except Exception:
+                pass
+
     def _process_queue_internal(self):
         try:
+            with self._lock:
+                self._batch_cancelled = False
+                initial_pending = [t for t in self.tasks if t.state == TaskState.PENDING]
+
             workers_count = max(1, self.max_workers)
+
+            # Pre-standardize shared clips & audio once before spawning render workers
+            if initial_pending and not self._batch_cancelled:
+                self._prewarm_batch_assets(initial_pending, workers_count)
+
             if workers_count == 1:
                 # Serial mode: sequential execution
                 while True:

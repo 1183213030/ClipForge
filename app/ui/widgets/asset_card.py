@@ -26,6 +26,7 @@ class AssetCardWidget(QFrame):
 
         self.project_root = self.icons_dir.parent.parent
         self.audio_path: Optional[str] = None
+        self.audio_duration: float = 0.0
         self.srt_path: Optional[str] = None
         self.video_folder: Optional[str] = None
         self.template_path: Optional[str] = None
@@ -214,6 +215,7 @@ class AssetCardWidget(QFrame):
         )
         if f:
             self.audio_path = f
+            self.audio_duration = 0.0
             self.audio_input.setText(Path(f).name)
             self.audio_info_lbl.setText("正在探测音频元数据...")
             
@@ -224,6 +226,7 @@ class AssetCardWidget(QFrame):
             self._probe_thread.start()
 
     def _on_audio_probed(self, meta):
+        self.audio_duration = float(meta.duration or 0.0)
         mins = int(meta.duration // 60)
         secs = meta.duration % 60
         self.audio_info_lbl.setText(f"音频时长: {mins:02d}:{secs:04.1f} ({meta.duration:.2f}s) | 编码: {meta.audio_codec}")
