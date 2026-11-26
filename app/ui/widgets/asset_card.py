@@ -1,6 +1,7 @@
 """
 Asset Selection and Scanning Card Widget for ClipForge.
 Manages input paths for novel audio, SRT subtitles, and video clips directory.
+Supports both Single Novel Mode and Multi-Novel Batch Mode (Directory & Multi-file).
 Displays real-time scan statistics with background thread integration.
 """
 
@@ -11,11 +12,13 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QFileDialog, QCheckBox
+    QLineEdit, QPushButton, QFileDialog, QCheckBox, QStackedWidget
 )
 
 from app.core.media_scanner import ScanResult
+from app.core.novel_task import NovelTaskItem, NovelBatchMatcher
 from app.ui.threads import ScanFolderThread, ProbeAudioThread
+from app.ui.widgets.novel_batch_widget import NovelBatchWidget
 
 
 class AssetCardWidget(QFrame):
@@ -32,6 +35,7 @@ class AssetCardWidget(QFrame):
         self.template_path: Optional[str] = None
         self.enable_template: bool = True
         self.scan_result: Optional[ScanResult] = None
+        self.is_batch_mode: bool = False
 
         self._scan_thread: Optional[ScanFolderThread] = None
         self._probe_thread: Optional[ProbeAudioThread] = None
@@ -46,18 +50,48 @@ class AssetCardWidget(QFrame):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        # Header
+        # Header with Mode Switcher
         header_layout = QHBoxLayout()
+        header_layout.setSpacing(10)
+
         icon_lbl = QLabel()
-        icon_lbl.setPixmap(QIcon(str(self.icons_dir / "film.svg")).pixmap(QSize(18, 18)))
+        film_icon = self.icons_dir / "film.svg"
+        if film_icon.is_file():
+            icon_lbl.setPixmap(QIcon(str(film_icon)).pixmap(QSize(18, 18)))
         title_lbl = QLabel("素材导入与管理")
         title_lbl.setProperty("class", "SectionTitle")
+
         header_layout.addWidget(icon_lbl)
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
+
+        # Mode Switcher Tabs
+        self.btn_mode_single = QPushButton("单篇混剪")
+        self.btn_mode_single.setProperty("class", "NavTabBtnActive")
+        self.btn_mode_single.setCursor(Qt.PointingHandCursor)
+        self.btn_mode_single.setToolTip("针对单篇小说音频与字幕进行快速混剪或生成多版差异成片")
+        self.btn_mode_single.clicked.connect(lambda: self.set_mode(False))
+
+        self.btn_mode_batch = QPushButton("多篇批量模式")
+        self.btn_mode_batch.setProperty("class", "NavTabBtn")
+        self.btn_mode_batch.setCursor(Qt.PointingHandCursor)
+        self.btn_mode_batch.setToolTip("支持多本小说目录自动配对导入与任务清单管理")
+        self.btn_mode_batch.clicked.connect(lambda: self.set_mode(True))
+
+        header_layout.addWidget(self.btn_mode_single)
+        header_layout.addWidget(self.btn_mode_batch)
         layout.addLayout(header_layout)
 
-        # 1. Novel Audio row
+        # Novel Inputs Container (Stacked: 0=Single, 1=Batch)
+        self.novel_stack = QStackedWidget()
+
+        # Page 0: Single Novel Mode
+        single_page = QWidget()
+        single_layout = QVBoxLayout(single_page)
+        single_layout.setContentsMargins(0, 0, 0, 0)
+        single_layout.setSpacing(8)
+
+        # 1. Single Novel Audio row
         self.audio_input = QLineEdit()
         self.audio_input.setPlaceholderText("选择小说配音音频 (MP3, WAV, M4A)...")
         self.audio_input.setReadOnly(True)
@@ -70,10 +104,10 @@ class AssetCardWidget(QFrame):
         audio_row = QHBoxLayout()
         audio_row.addWidget(self.audio_input)
         audio_row.addWidget(btn_browse_audio)
-        layout.addLayout(audio_row)
-        layout.addWidget(self.audio_info_lbl)
+        single_layout.addLayout(audio_row)
+        single_layout.addWidget(self.audio_info_lbl)
 
-        # 2. SRT Subtitle row
+        # 2. Single SRT Subtitle row
         self.srt_input = QLineEdit()
         self.srt_input.setPlaceholderText("选择对应 SRT 字幕文件 (UTF-8 / GBK)...")
         self.srt_input.setReadOnly(True)
@@ -86,14 +120,23 @@ class AssetCardWidget(QFrame):
         srt_row = QHBoxLayout()
         srt_row.addWidget(self.srt_input)
         srt_row.addWidget(btn_browse_srt)
-        layout.addLayout(srt_row)
-        layout.addWidget(self.srt_info_lbl)
+        single_layout.addLayout(srt_row)
+        single_layout.addWidget(self.srt_info_lbl)
 
-        # 3. Video folder row
+        self.novel_stack.addWidget(single_page)
+
+        # Page 1: Multi-Novel Batch Mode
+        self.novel_batch_widget = NovelBatchWidget(self.icons_dir)
+        self.novel_batch_widget.sig_tasks_changed.connect(self._notify_change)
+        self.novel_stack.addWidget(self.novel_batch_widget)
+
+        layout.addWidget(self.novel_stack)
+
+        # 3. Shared Video folder row
         self.folder_input = QLineEdit()
-        self.folder_input.setPlaceholderText("选择解压视频素材文件夹...")
+        self.folder_input.setPlaceholderText("选择解压视频素材文件夹 (所有小说任务共享画面素材池)...")
         self.folder_input.setReadOnly(True)
-        btn_browse_folder = QPushButton("选择文件夹")
+        btn_browse_folder = QPushButton("选择素材文件夹")
         btn_browse_folder.clicked.connect(self._browse_folder)
 
         self.btn_rescan = QPushButton("重新扫描")
@@ -157,6 +200,55 @@ class AssetCardWidget(QFrame):
 
         layout.addWidget(self.stats_frame)
 
+    def set_mode(self, is_batch: bool):
+        """Switches between Single Novel Mode and Multi-Novel Batch Mode."""
+        self.is_batch_mode = is_batch
+        if is_batch:
+            self.btn_mode_single.setProperty("class", "NavTabBtn")
+            self.btn_mode_batch.setProperty("class", "NavTabBtnActive")
+            self.novel_stack.setCurrentIndex(1)
+            # Auto-migrate single novel to batch list if batch list is empty
+            if self.audio_path and not self.novel_batch_widget.tasks:
+                single_item = NovelTaskItem(
+                    task_id="NOVEL_001",
+                    novel_title=Path(self.audio_path).stem,
+                    audio_path=self.audio_path,
+                    srt_path=self.srt_path,
+                    audio_duration=self.audio_duration,
+                    export_count=1
+                )
+                self.novel_batch_widget.add_task(single_item)
+        else:
+            self.btn_mode_single.setProperty("class", "NavTabBtnActive")
+            self.btn_mode_batch.setProperty("class", "NavTabBtn")
+            self.novel_stack.setCurrentIndex(0)
+
+        self.btn_mode_single.style().unpolish(self.btn_mode_single)
+        self.btn_mode_single.style().polish(self.btn_mode_single)
+        self.btn_mode_batch.style().unpolish(self.btn_mode_batch)
+        self.btn_mode_batch.style().polish(self.btn_mode_batch)
+
+        self._notify_change()
+
+    def get_novel_tasks(self, default_count: int = 1) -> list[NovelTaskItem]:
+        """Returns novel task items according to active mode."""
+        if self.is_batch_mode:
+            return self.novel_batch_widget.get_tasks()
+
+        if self.audio_path and Path(self.audio_path).is_file():
+            return [
+                NovelTaskItem(
+                    task_id="NOVEL_001",
+                    novel_title=Path(self.audio_path).stem,
+                    audio_path=self.audio_path,
+                    srt_path=self.srt_path,
+                    audio_duration=self.audio_duration,
+                    export_count=default_count,
+                    is_valid=True
+                )
+            ]
+        return []
+
     def _auto_detect_template(self):
         """Auto-detect bundled customer novel tweet template."""
         candidates = [
@@ -218,7 +310,7 @@ class AssetCardWidget(QFrame):
             self.audio_duration = 0.0
             self.audio_input.setText(Path(f).name)
             self.audio_info_lbl.setText("正在探测音频元数据...")
-            
+
             # Probe audio asynchronously
             self._probe_thread = ProbeAudioThread(f)
             self._probe_thread.sig_finished.connect(self._on_audio_probed)

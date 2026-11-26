@@ -25,6 +25,7 @@ from app.core.edit_project import EditProject, create_project
 from app.services.task_service import TaskService, TaskRecord, BatchStatistics, TaskState
 from app.ui.threads import BatchExportThread, DetectHardwareThread
 from app.ui.pages.workbench_page import WorkbenchPage
+from app.ui.pages.color_matrix_page import ColorMatrixPage
 from app.ui.widgets.asset_card import AssetCardWidget
 from app.ui.widgets.subtitle_card import SubtitleCardWidget
 from app.ui.widgets.video_card import VideoCardWidget
@@ -61,9 +62,9 @@ class MainWindow(QMainWindow):
         self._start_hw_detection()
 
     def _init_window(self):
-        self.setWindowTitle("ClipForge - 解压短视频全自动混剪工作台")
-        self.setMinimumSize(1080, 750)
-        self.resize(1180, 820)
+        self.setWindowTitle("ClipForge 3.0 - 智能短视频工坊")
+        self.setMinimumSize(1120, 780)
+        self.resize(1220, 840)
 
         # Set Window Icon
         logo_path = self.icons_dir / "logo.png"
@@ -131,6 +132,10 @@ class MainWindow(QMainWindow):
         self.workbench_page = WorkbenchPage(self.project_root, self.icons_dir)
         self.stack.addWidget(self.workbench_page)
 
+        # Page 2: Color Matrix Studio (ClipForge 3.0)
+        self.color_matrix_page = ColorMatrixPage(self.project_root, self.icons_dir)
+        self.stack.addWidget(self.color_matrix_page)
+
         main_layout.addWidget(self.stack, stretch=1)
 
     def _create_header(self) -> QHBoxLayout:
@@ -144,7 +149,7 @@ class MainWindow(QMainWindow):
         if logo_img.is_file():
             logo_lbl.setPixmap(QIcon(str(logo_img)).pixmap(QSize(22, 22)))
 
-        title_lbl = QLabel("ClipForge 片段工坊")
+        title_lbl = QLabel("ClipForge 3.0")
         title_lbl.setStyleSheet("font-size: 15px; font-weight: 700; color: #ffffff;")
 
         header.addWidget(logo_lbl)
@@ -162,8 +167,14 @@ class MainWindow(QMainWindow):
         self.btn_nav_workbench.setCursor(Qt.PointingHandCursor)
         self.btn_nav_workbench.clicked.connect(lambda: self._switch_page(1))
 
+        self.btn_nav_color = QPushButton("矩阵调色大师")
+        self.btn_nav_color.setProperty("class", "NavTabBtn")
+        self.btn_nav_color.setCursor(Qt.PointingHandCursor)
+        self.btn_nav_color.clicked.connect(lambda: self._switch_page(2))
+
         header.addWidget(self.btn_nav_batch)
         header.addWidget(self.btn_nav_workbench)
+        header.addWidget(self.btn_nav_color)
 
         header.addStretch()
         badge_offline = QLabel("纯本地运行 · 零云端依赖")
@@ -173,17 +184,13 @@ class MainWindow(QMainWindow):
 
     def _switch_page(self, index: int):
         self.stack.setCurrentIndex(index)
-        if index == 0:
-            self.btn_nav_batch.setProperty("class", "NavTabBtnActive")
-            self.btn_nav_workbench.setProperty("class", "NavTabBtn")
-        else:
-            self.btn_nav_batch.setProperty("class", "NavTabBtn")
-            self.btn_nav_workbench.setProperty("class", "NavTabBtnActive")
+        self.btn_nav_batch.setProperty("class", "NavTabBtnActive" if index == 0 else "NavTabBtn")
+        self.btn_nav_workbench.setProperty("class", "NavTabBtnActive" if index == 1 else "NavTabBtn")
+        self.btn_nav_color.setProperty("class", "NavTabBtnActive" if index == 2 else "NavTabBtn")
 
-        self.btn_nav_batch.style().unpolish(self.btn_nav_batch)
-        self.btn_nav_batch.style().polish(self.btn_nav_batch)
-        self.btn_nav_workbench.style().unpolish(self.btn_nav_workbench)
-        self.btn_nav_workbench.style().polish(self.btn_nav_workbench)
+        for btn in (self.btn_nav_batch, self.btn_nav_workbench, self.btn_nav_color):
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
 
     def _create_batch_control_card(self) -> QFrame:
@@ -199,11 +206,12 @@ class MainWindow(QMainWindow):
 
         # Settings Row
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("生成数量:"))
+        row1.addWidget(QLabel("单篇混剪版本:"))
         self.spin_count = QSpinBox()
         self.spin_count.setRange(1, 50)
-        self.spin_count.setValue(3)
+        self.spin_count.setValue(1)
         self.spin_count.setFixedWidth(75)
+        self.spin_count.setToolTip("单篇模式下生成的不同画面混剪版本数；多篇批量模式下可在左侧任务清单中为各小说独立定制")
         row1.addWidget(self.spin_count)
 
         row1.addSpacing(12)
@@ -343,14 +351,15 @@ class MainWindow(QMainWindow):
 
     def _start_batch_export(self):
         # 1. Validation before export
-        audio_path = self.asset_card.audio_path
-        srt_path = self.asset_card.srt_path
+        novel_tasks = self.asset_card.get_novel_tasks(default_count=self.spin_count.value())
         scan_res = self.asset_card.scan_result
         output_dir = self.input_output_dir.text()
-        count = self.spin_count.value()
 
-        if not audio_path or not Path(audio_path).is_file():
-            QMessageBox.warning(self, "输入检查", "请先选择有效的小说配音音频文件！")
+        if not novel_tasks:
+            if self.asset_card.is_batch_mode:
+                QMessageBox.warning(self, "输入检查", "请先在多篇小说清单中添加至少 1 本小说任务（支持目录自动配对或多选文件添加）！")
+            else:
+                QMessageBox.warning(self, "输入检查", "请先选择有效的小说配音音频文件！")
             return
 
         if not scan_res or scan_res.valid_count == 0:
@@ -361,27 +370,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "输入检查", "指定的输出目录不存在或不可写！")
             return
 
-        # 2. Build TimelinePlans reusing existing scan result (no redundant disk scan / SHA-256!)
-        try:
-            builder = TimelineBuilder()
-            audio_dur = self.asset_card.audio_duration
-            if audio_dur <= 0:
-                audio_meta = probe_media(audio_path)
-                if not audio_meta.is_valid_audio:
-                    raise ValueError(f"小说音频文件无效或无法读取: {audio_path}")
-                audio_dur = audio_meta.duration
-                self.asset_card.audio_duration = audio_dur
-
-            plans = builder.build_plans_from_scan(
-                scan_res=scan_res,
-                audio_duration=audio_dur,
-                count=count,
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "组合计划生成失败", f"构建视频编排时间轴失败:\n{str(e)}")
-            return
-
-        # 3. Create batch in TaskService
+        # 2. Build TimelinePlans and tasks for each novel task
         sub_cfg = self.subtitle_card.get_subtitle_config()
         tpl_path = self.asset_card.template_path if self.asset_card.enable_template else None
         export_opts = self.video_card.get_export_options(
@@ -390,14 +379,46 @@ class MainWindow(QMainWindow):
             enable_template=self.asset_card.enable_template and bool(tpl_path)
         )
 
-        new_tasks = self.task_service.create_batch(
-            plans=plans,
-            audio_path=audio_path,
-            srt_path=srt_path,
-            output_dir=output_dir,
-            options=export_opts,
-            filename_prefix="clipforge"
-        )
+        self.task_service.clear_all_tasks()
+        all_new_tasks = []
+        builder = TimelineBuilder()
+
+        try:
+            for item in novel_tasks:
+                if not item.is_valid:
+                    continue
+
+                audio_dur = item.audio_duration
+                if audio_dur <= 0:
+                    audio_meta = probe_media(item.audio_path)
+                    if not audio_meta.is_valid_audio:
+                        raise ValueError(f"小说音频文件无效或无法读取: {item.audio_path}")
+                    audio_dur = audio_meta.duration
+                    item.audio_duration = audio_dur
+
+                count = item.export_count if self.asset_card.is_batch_mode else self.spin_count.value()
+                plans = builder.build_plans_from_scan(
+                    scan_res=scan_res,
+                    audio_duration=audio_dur,
+                    count=max(1, count),
+                )
+
+                created = self.task_service.create_batch(
+                    plans=plans,
+                    audio_path=item.audio_path,
+                    srt_path=item.srt_path,
+                    output_dir=output_dir,
+                    options=export_opts,
+                    filename_prefix=item.novel_title
+                )
+                all_new_tasks.extend(created)
+        except Exception as e:
+            QMessageBox.critical(self, "组合计划生成失败", f"构建视频编排时间轴失败:\n{str(e)}")
+            return
+
+        if not all_new_tasks:
+            QMessageBox.warning(self, "任务检查", "未能创建任何有效导出任务，请检查小说音频与时长设置。")
+            return
 
         # Clear existing task widgets
         for w in self.task_widgets.values():
@@ -405,7 +426,7 @@ class MainWindow(QMainWindow):
         self.task_widgets.clear()
 
         # Build task item widgets in reverse stretch
-        for t in new_tasks:
+        for t in all_new_tasks:
             w = TaskItemWidget(
                 task=t,
                 icons_dir=self.icons_dir,

@@ -167,6 +167,10 @@ def detect_best_hw_encoder(ffmpeg_path: Optional[str] = None) -> Optional[Encode
         return best
 
 
+# Convenient alias
+get_best_hardware_encoder = detect_best_hw_encoder
+
+
 def resolve_encoder_profile(
     encode_mode: str = "auto",
     preset: str = "veryfast",

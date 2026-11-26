@@ -250,3 +250,33 @@ QListWidget::item {
 QListWidget::item:selected {
     background-color: transparent;
 }
+
+/* Table Widget Styling */
+QTableWidget {
+    background-color: #121319;
+    border: 1px solid #232532;
+    border-radius: 8px;
+    gridline-color: #1c1d27;
+    outline: none;
+    color: #e2e4ec;
+}
+
+QTableWidget::item {
+    padding: 4px 6px;
+    border-bottom: 1px solid #1a1c26;
+}
+
+QTableWidget::item:selected {
+    background-color: #1c2338;
+    color: #60a5fa;
+}
+
+QHeaderView::section {
+    background-color: #161822;
+    color: #94a3b8;
+    padding: 5px 8px;
+    border: none;
+    border-bottom: 1px solid #282a3a;
+    font-size: 11px;
+    font-weight: 600;
+}

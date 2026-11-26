@@ -125,6 +125,12 @@ class TaskService:
             self._notify_batch_update()
             return new_tasks
 
+    def clear_all_tasks(self):
+        """Clears all task records from service."""
+        with self._lock:
+            self.tasks.clear()
+            self._notify_batch_update()
+
     def get_task(self, task_id: str) -> Optional[TaskRecord]:
         with self._lock:
             for t in self.tasks:
